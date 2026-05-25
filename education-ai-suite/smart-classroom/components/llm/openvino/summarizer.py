@@ -14,6 +14,7 @@ class Summarizer(BaseSummarizer):
         self.model_name = model_name
         self.device = device.upper()
         self.temperature = temperature
+        self._held_model = None
 
         self.model_path = ensure_model.get_model_path()
 
@@ -30,6 +31,18 @@ class Summarizer(BaseSummarizer):
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def acquire_model(self):
+        if self._held_model is None:
+            self._held_model = self._load_model()
+            logger.info("Model acquired and held in memory for batch operations.")
+        return self._held_model
+
+    def release_model(self):
+        if self._held_model is not None:
+            self._destroy_model(self._held_model)
+            self._held_model = None
+            logger.info("Held model released.")
 
     def _load_model(self):
         logger.info("Loading OVModelForCausalLM instance...")
@@ -50,6 +63,7 @@ class Summarizer(BaseSummarizer):
     def generate(self, prompt: str, stream: bool = True):
         max_new_tokens = config.models.summarizer.max_new_tokens
         inputs = self.tokenizer(prompt, return_tensors="pt")
+        use_held = self._held_model is not None
 
         if stream:
             class CountingTextIteratorStreamer(TextIteratorStreamer):
@@ -74,9 +88,14 @@ class Summarizer(BaseSummarizer):
 
             def run_generation():
                 model = None
+                should_destroy = False
                 try:
                     with audio_pipeline_lock:
-                        model = self._load_model()
+                        if use_held:
+                            model = self._held_model
+                        else:
+                            model = self._load_model()
+                            should_destroy = True
                         model.generate(
                             input_ids=inputs.input_ids,
                             max_new_tokens=max_new_tokens,
@@ -106,7 +125,7 @@ class Summarizer(BaseSummarizer):
                         )
 
                 finally:
-                    if model is not None:
+                    if should_destroy and model is not None:
                         self._destroy_model(model)
                     streamer.end()
 
@@ -115,9 +134,14 @@ class Summarizer(BaseSummarizer):
 
         else:
             model = None
+            should_destroy = False
             try:
                 with audio_pipeline_lock:
-                    model = self._load_model()
+                    if use_held:
+                        model = self._held_model
+                    else:
+                        model = self._load_model()
+                        should_destroy = True
                     output = model.generate(
                         input_ids=inputs.input_ids,
                         max_new_tokens=max_new_tokens,
@@ -133,5 +157,5 @@ class Summarizer(BaseSummarizer):
                     generated_ids = output[:, inputs.input_ids.shape[1]:]
                     return self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             finally:
-                if model is not None:
+                if should_destroy and model is not None:
                     self._destroy_model(model)
