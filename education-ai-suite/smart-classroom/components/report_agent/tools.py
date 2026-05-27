@@ -48,21 +48,23 @@ class ToolRegistry:
 5. get_mindmap - Retrieve the mind map knowledge hierarchy (mindmap.mmd).
 6. get_topic_segmentation - Retrieve topic-wise content segmentation (topics.json).
 7. get_transcription - Retrieve the raw transcription text (transcription.txt).
-8. get_memory - Retrieve persistent memory (historical class data, trends).
+8. get_teacher_transcription - Retrieve teacher-only transcription (teacher_transcription.txt). Useful for teaching behavior analysis.
+9. get_content_segmentation - Retrieve content-segmented transcription (content_segmentation_transcription.txt). More structured than raw transcription.
+10. get_memory - Retrieve persistent memory (historical class data, trends).
 
 == MEMORY ==
-9. save_memory - Save important findings to persistent memory for cross-session analysis.
+11. save_memory - Save important findings to persistent memory for cross-session analysis.
 
 == SKILLS (higher-level analysis combining READ data + LLM reasoning) ==
-10. skill_engagement_analysis - Compute engagement score, identify patterns.
-11. skill_video_slice_summary - Identify key teaching segments for video slicing.
-12. skill_content_analysis - Analyze teaching objectives and knowledge coverage.
-13. skill_ocr_board_analysis - Extract and analyze board/PPT content.
-14. skill_quiz_generation - Generate 5 quiz questions from class content.
-15. skill_teacher_behavior - Analyze teacher movement and teaching style.
+12. skill_engagement_analysis - Compute engagement score, identify patterns.
+13. skill_video_slice_summary - Identify key teaching segments for video slicing.
+14. skill_content_analysis - Analyze teaching objectives and knowledge coverage.
+15. skill_ocr_board_analysis - Extract and analyze board/PPT content.
+16. skill_quiz_generation - Generate 5 quiz questions from class content.
+17. skill_teacher_behavior - Analyze teacher movement and teaching style.
 
 == CONTROL ==
-16. generate_final_report - Generate the final output. Call after collecting sufficient data.
+18. generate_final_report - Generate the final output. Call after collecting sufficient data.
 
 IMPORTANT:
 - This agent only READS existing data. It does NOT generate transcription, summary, or mindmap.
@@ -84,6 +86,8 @@ Action Input: <optional input or "none">"""
             "get_session_metadata": self._get_session_metadata,
             "get_topic_segmentation": self._get_topic_segmentation,
             "get_transcription": self._get_transcription,
+            "get_teacher_transcription": self._get_teacher_transcription,
+            "get_content_segmentation": self._get_content_segmentation,
             "get_memory": self._get_memory,
         }
 
@@ -221,7 +225,8 @@ Action Input: <optional input or "none">"""
         processed_files = []
         for fname in ["transcription.txt", "teacher_transcription.txt",
                       "content_segmentation_transcription.txt",
-                      "summary.md", "mindmap.mmd", "topics.json", "class_report.md"]:
+                      "summary.md", "mindmap.mmd", "topics.json",
+                      "class_report.md", "class_report.docx"]:
             if os.path.exists(os.path.join(self.session_dir, fname)):
                 processed_files.append(fname)
 
@@ -276,6 +281,114 @@ Action Input: <optional input or "none">"""
             content = content[:3000] + "\n... [truncated, full text available in file]"
 
         return f"Observation: Transcription retrieved successfully.\n{content}"
+
+    def _get_teacher_transcription(self, _input: str) -> str:
+        path = os.path.join(self.session_dir, "teacher_transcription.txt")
+
+        if not os.path.exists(path):
+            return "Observation: Teacher transcription (teacher_transcription.txt) is NOT available."
+
+        content = StorageManager.read_text_file(path)
+        if not content:
+            return "Observation: teacher_transcription.txt exists but is empty."
+
+        lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
+        total_sentences = len(lines)
+        total_chars = sum(len(l) for l in lines)
+        question_count = sum(1 for l in lines if l.endswith('？') or l.endswith('?'))
+
+        from utils.session_state_manager import SessionState
+        session_state = SessionState.get_session_state(self.session_id)
+        audio_duration_sec = session_state.get("audio_duration", 0)
+        audio_duration_min = audio_duration_sec / 60.0 if audio_duration_sec > 0 else 0
+
+        speaking_speed = round(total_chars / audio_duration_min) if audio_duration_min > 0 else 0
+
+        stats = (
+            f"--- Teacher Speech Statistics ---\n"
+            f"Total sentences: {total_sentences}\n"
+            f"Total characters: {total_chars}\n"
+            f"Question count (sentences ending with ?): {question_count}\n"
+            f"Audio duration: {audio_duration_sec}s ({audio_duration_min:.1f} min)\n"
+            f"Estimated speaking speed: {speaking_speed} chars/min\n"
+            f"---\n"
+        )
+
+        sample = "\n".join(lines[:20])
+        if len(lines) > 20:
+            sample += f"\n... [{len(lines) - 20} more sentences]"
+
+        return f"Observation: Teacher transcription analyzed.\n{stats}\nSample:\n{sample}"
+
+    def _get_content_segmentation(self, _input: str) -> str:
+        import re as _re
+
+        path = os.path.join(self.session_dir, "content_segmentation_transcription.txt")
+
+        if not os.path.exists(path):
+            return "Observation: Content segmentation transcription (content_segmentation_transcription.txt) is NOT available."
+
+        content = StorageManager.read_text_file(path)
+        if not content:
+            return "Observation: content_segmentation_transcription.txt exists but is empty."
+
+        lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
+        total_segments = len(lines)
+
+        timestamps = []
+        for line in lines:
+            match = _re.match(r'\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]', line)
+            if match:
+                timestamps.append((float(match.group(1)), float(match.group(2))))
+
+        if timestamps:
+            total_duration_sec = timestamps[-1][1] - timestamps[0][0]
+            total_duration_min = total_duration_sec / 60.0
+
+            # Analyze density per 5-minute bucket
+            bucket_size = 300  # 5 minutes
+            max_time = timestamps[-1][1]
+            buckets = {}
+            for start, end in timestamps:
+                bucket_idx = int(start // bucket_size)
+                buckets[bucket_idx] = buckets.get(bucket_idx, 0) + 1
+
+            density_report = []
+            for i in range(int(max_time // bucket_size) + 1):
+                t_start = i * bucket_size
+                t_end = min((i + 1) * bucket_size, max_time)
+                count = buckets.get(i, 0)
+                density_report.append(
+                    f"  {t_start//60:.0f}-{t_end//60:.0f}min: {count} segments"
+                )
+
+            # Find low-density periods
+            if buckets:
+                min_count = min(buckets.values())
+                low_periods = [f"{k*bucket_size//60:.0f}-{(k+1)*bucket_size//60:.0f}min"
+                               for k, v in buckets.items() if v == min_count]
+            else:
+                low_periods = []
+
+            stats = (
+                f"--- Content Segmentation Statistics ---\n"
+                f"Total segments: {total_segments}\n"
+                f"Total duration: {total_duration_sec:.0f}s ({total_duration_min:.1f} min)\n"
+                f"Time range: {timestamps[0][0]:.1f}s - {timestamps[-1][1]:.1f}s\n"
+                f"Avg segment duration: {total_duration_sec/total_segments:.1f}s\n"
+                f"\nDensity per 5-min period (more segments = more active):\n"
+                + "\n".join(density_report) + "\n"
+                f"\nLow activity periods: {', '.join(low_periods) if low_periods else 'None detected'}\n"
+                f"---\n"
+            )
+        else:
+            stats = f"--- Content Segmentation ---\nTotal lines: {total_segments}\n(No timestamps detected)\n---\n"
+
+        sample = "\n".join(lines[:10])
+        if len(lines) > 10:
+            sample += f"\n... [{len(lines) - 10} more segments]"
+
+        return f"Observation: Content segmentation analyzed.\n{stats}\nSample:\n{sample}"
 
 
     # ==================== MEMORY TOOLS ====================

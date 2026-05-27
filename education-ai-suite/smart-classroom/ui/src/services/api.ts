@@ -42,7 +42,7 @@ export interface SearchResult {
 }
 
 const env = (import.meta as any).env ?? {};
-const BASE_URL: string = env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+export const BASE_URL: string = env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 // Default to empty string (same-origin) so the Vite dev proxy routes /api/v1
 // to port 9011 without CORS. Set VITE_CONTENT_SEARCH_API_URL for remote hosts.
 const CONTENT_SEARCH_API_URL: string = env.VITE_CONTENT_SEARCH_API_URL || '';
@@ -1187,13 +1187,22 @@ export async function csGetTags(): Promise<string[]> {
 
 // ==================== Agent Chat API ====================
 
+export interface PlanStep {
+  action: string;
+  thought: string;
+  llm?: boolean;
+}
+
 export interface AgentChatEvent {
-  type: 'agent_token' | 'agent_thinking' | 'error' | 'done';
+  type: 'agent_token' | 'agent_thinking' | 'agent_plan' | 'agent_plan_update' | 'agent_step_start' | 'agent_step_done' | 'report_ready' | 'error' | 'done';
   token?: string;
   message?: string;
   thought?: string;
   action?: string;
   conversationId?: string;
+  sessionId?: string;
+  steps?: PlanStep[];
+  index?: number;
 }
 
 export async function* streamAgentChat(
@@ -1245,6 +1254,31 @@ export async function* streamAgentChat(
 
       if (chunk.type === 'thinking') {
         yield { type: 'agent_thinking', thought: chunk.thought, action: chunk.action, conversationId: detectedConversationId };
+        continue;
+      }
+
+      if (chunk.type === 'plan') {
+        yield { type: 'agent_plan', steps: chunk.steps, conversationId: detectedConversationId };
+        continue;
+      }
+
+      if (chunk.type === 'plan_update') {
+        yield { type: 'agent_plan_update', steps: chunk.steps, conversationId: detectedConversationId };
+        continue;
+      }
+
+      if (chunk.type === 'step_start') {
+        yield { type: 'agent_step_start', index: chunk.index, conversationId: detectedConversationId };
+        continue;
+      }
+
+      if (chunk.type === 'step_done') {
+        yield { type: 'agent_step_done', index: chunk.index, conversationId: detectedConversationId };
+        continue;
+      }
+
+      if (chunk.type === 'report_ready') {
+        yield { type: 'report_ready', sessionId: chunk.session_id, conversationId: detectedConversationId };
         continue;
       }
 

@@ -892,9 +892,16 @@ async def generate_report(request: ReportRequest):
     async def event_stream():
         for event in pipeline.run_report(user_query=request.query):
             if isinstance(event, dict):
-                if event["type"] == "thinking":
+                etype = event["type"]
+                if etype == "thinking":
                     yield json.dumps({"type": "thinking", "thought": event.get("thought", ""), "action": event.get("action", "")}) + "\n"
-                elif event["type"] == "token":
+                elif etype in ("plan", "plan_update"):
+                    yield json.dumps({"type": etype, "steps": event.get("steps", [])}) + "\n"
+                elif etype in ("step_start", "step_done"):
+                    yield json.dumps({"type": etype, "index": event.get("index")}) + "\n"
+                elif etype == "report_ready":
+                    yield json.dumps({"type": "report_ready", "session_id": event.get("session_id", request.session_id)}) + "\n"
+                elif etype == "token":
                     content = event["content"]
                     if content.startswith("[ERROR]:"):
                         yield json.dumps({"token": "", "error": content}) + "\n"
@@ -938,6 +945,7 @@ async def agent_chat(request: AgentChatRequest):
 
     async def event_stream():
         full_response = ""
+        report_ready_sent = False
 
         for event in pipeline.run_report(
             user_query=request.message,
@@ -945,9 +953,17 @@ async def agent_chat(request: AgentChatRequest):
             output_format=request.output_format,
         ):
             if isinstance(event, dict):
-                if event["type"] == "thinking":
+                etype = event["type"]
+                if etype == "thinking":
                     yield json.dumps({"type": "thinking", "thought": event.get("thought", ""), "action": event.get("action", ""), "conversation_id": conversation_id}) + "\n"
-                elif event["type"] == "token":
+                elif etype in ("plan", "plan_update"):
+                    yield json.dumps({"type": etype, "steps": event.get("steps", []), "conversation_id": conversation_id}) + "\n"
+                elif etype in ("step_start", "step_done"):
+                    yield json.dumps({"type": etype, "index": event.get("index"), "conversation_id": conversation_id}) + "\n"
+                elif etype == "report_ready":
+                    report_ready_sent = True
+                    yield json.dumps({"type": "report_ready", "session_id": event.get("session_id", session_id), "conversation_id": conversation_id}) + "\n"
+                elif etype == "token":
                     content = event["content"]
                     if content.startswith("[ERROR]:"):
                         yield json.dumps({"token": "", "error": content, "conversation_id": conversation_id}) + "\n"
@@ -956,7 +972,20 @@ async def agent_chat(request: AgentChatRequest):
                     yield json.dumps({"token": content, "error": "", "conversation_id": conversation_id}) + "\n"
             await asyncio.sleep(0)
 
-        conv_manager.add_message(conversation_id, "assistant", full_response)
+        # Save assistant response (truncated for context efficiency)
+        if len(full_response) > 500:
+            summary_for_history = full_response[:300] + "\n...[full report saved]..."
+        else:
+            summary_for_history = full_response
+        conv_manager.add_message(conversation_id, "assistant", summary_for_history)
+
+        # Persist observations so follow-up turns can access collected data without re-fetching
+        if hasattr(pipeline, 'report_agent') and pipeline.report_agent and pipeline.report_agent.observations:
+            conv_manager.add_observations(conversation_id, pipeline.report_agent.observations)
+
+        # Signal that a downloadable report is available (if not already sent by template mode)
+        if not report_ready_sent and full_response and len(full_response) > 200:
+            yield json.dumps({"type": "report_ready", "session_id": session_id, "conversation_id": conversation_id}) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/json")
 
@@ -981,6 +1010,70 @@ def get_report(session_id: str):
     report_content = StorageManager.read_text_file(report_path)
     return JSONResponse(
         content={"session_id": session_id, "report": report_content},
+        status_code=200,
+    )
+
+
+@router.get("/report/{session_id}/download")
+def download_report(session_id: str):
+    """Download the class report as a Word (.docx) document."""
+    from utils.docx_export import markdown_to_docx
+
+    project_config = RuntimeConfig.get_section("Project")
+    session_dir = os.path.join(
+        project_config.get("location"),
+        project_config.get("name"),
+        session_id,
+    )
+
+    # Prefer template-generated .docx if it exists (already formatted)
+    docx_path = os.path.join(session_dir, "class_report.docx")
+    if os.path.exists(docx_path):
+        return FileResponse(
+            path=docx_path,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"class_report_{session_id}.docx",
+        )
+
+    # Fallback: convert markdown to docx
+    report_md_path = os.path.join(session_dir, "class_report.md")
+    if not os.path.exists(report_md_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Report not found. Generate it first.",
+        )
+
+    report_content = StorageManager.read_text_file(report_md_path)
+    markdown_to_docx(report_content, docx_path, title=f"课堂评估报告 - {session_id}")
+
+    return FileResponse(
+        path=docx_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=f"class_report_{session_id}.docx",
+    )
+
+
+@router.post("/report/template/upload")
+def upload_report_template(file: UploadFile = File(...)):
+    """Upload a custom report template (.docx). Replaces the project-level default template."""
+    if not file.filename.endswith('.docx'):
+        raise HTTPException(status_code=400, detail="Only .docx files are supported as templates.")
+
+    project_config = RuntimeConfig.get_section("Project")
+    project_dir = os.path.join(
+        project_config.get("location"),
+        project_config.get("name"),
+    )
+    os.makedirs(project_dir, exist_ok=True)
+    template_path = os.path.join(project_dir, "report_template.docx")
+
+    content = file.file.read()
+    with open(template_path, "wb") as f:
+        f.write(content)
+
+    logger.info(f"Custom report template uploaded: {template_path} ({len(content)} bytes)")
+    return JSONResponse(
+        content={"message": "Template uploaded successfully", "path": template_path},
         status_code=200,
     )
 

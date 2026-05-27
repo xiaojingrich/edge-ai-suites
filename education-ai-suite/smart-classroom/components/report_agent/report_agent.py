@@ -27,6 +27,13 @@ from utils.config_loader import config
 from utils.runtime_config_loader import RuntimeConfig
 from utils.storage_manager import StorageManager
 from utils.locks import audio_pipeline_lock
+from utils.template_manager import (
+    get_template_path,
+    extract_template_structure,
+    build_template_fill_prompt,
+    fill_template,
+    parse_llm_json_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +102,25 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-    def _build_report_prompt(self) -> str:
+    def _build_report_prompt(self, use_template: bool = False) -> str:
         """Build the final report generation prompt with all collected observations."""
         observations_text = "\n\n---\n\n".join(self.observations)
+
+        if use_template:
+            template_path = get_template_path(self.language, self.session_id)
+            if template_path:
+                template_structure = extract_template_structure(template_path)
+                user_content = build_template_fill_prompt(template_structure, observations_text, self.language)
+                system_msg = ("你是一个专业的教育分析师。根据提供的数据填充报告模板字段，输出JSON。"
+                              if self.language == "zh"
+                              else "You are a professional educational analyst. Fill report template fields based on provided data. Output JSON.")
+                messages = [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_content},
+                ]
+                return self.model.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                )
 
         if self.language == "zh":
             user_content = REPORT_GENERATION_PROMPT_ZH.format(collected_observations=observations_text)
@@ -214,15 +237,24 @@ class ReportAgent(PipelineComponent):
         return False
 
     def _run_fast_collection(self):
-        """Collect all available data without LLM decision-making. Yields thinking events."""
+        """Collect all available data without LLM decision-making. Yields plan + step events."""
         session_dir = self._get_session_dir()
         report_path = os.path.join(session_dir, "class_report.md")
 
         if not self._is_report_request() and os.path.exists(report_path):
-            yield {"type": "thinking", "action": "get_class_report", "thought": "Reading existing report for follow-up"}
+            plan_steps = [
+                {"action": "intent_analysis", "thought": "理解用户意图" if self.language == "zh" else "Understand user intent", "llm": False},
+                {"action": "get_class_report", "thought": "读取已有报告" if self.language == "zh" else "Read existing report", "llm": False},
+                {"action": "generate", "thought": "生成回复" if self.language == "zh" else "Generate response", "llm": True},
+            ]
+            yield {"type": "plan", "steps": plan_steps}
+            yield {"type": "step_start", "index": 0}
+            yield {"type": "step_done", "index": 0}
+            yield {"type": "step_start", "index": 1}
             obs = self.tools.execute_tool("get_class_report", "none")
             self.observations.append(f"[get_class_report] {obs}")
             self.trajectory.append("Fast path: read existing report for follow-up question")
+            yield {"type": "step_done", "index": 1}
             logger.info("[ReportAgent] Fast path: using existing report for follow-up")
             return
 
@@ -231,14 +263,31 @@ class ReportAgent(PipelineComponent):
             ("get_class_summary", "读取课堂摘要" if self.language == "zh" else "Reading class summary"),
             ("get_mindmap", "读取知识图谱" if self.language == "zh" else "Reading mind map"),
             ("get_topic_segmentation", "读取主题分段" if self.language == "zh" else "Reading topic segmentation"),
-            ("get_transcription", "读取转录文本" if self.language == "zh" else "Reading transcription"),
+            ("get_teacher_transcription", "读取教师转录" if self.language == "zh" else "Reading teacher transcription"),
+            ("get_content_segmentation", "读取内容分段转录" if self.language == "zh" else "Reading content segmentation"),
         ]
 
-        for tool_name, desc in read_tools:
-            yield {"type": "thinking", "action": tool_name, "thought": desc}
+        template_path = get_template_path(self.language, self.session_id)
+        plan_steps = [
+            {"action": "intent_analysis", "thought": "理解用户意图 → 生成报告" if self.language == "zh" else "Understand intent → generate report", "llm": False},
+        ]
+        plan_steps += [{"action": t[0], "thought": t[1], "llm": False} for t in read_tools]
+        if template_path:
+            plan_steps.append({"action": "generate", "thought": "LLM 生成报告内容" if self.language == "zh" else "LLM generates report content", "llm": True})
+            plan_steps.append({"action": "fill_template", "thought": "填充报告模板 → Word" if self.language == "zh" else "Fill report template → Word", "llm": False})
+        else:
+            plan_steps.append({"action": "generate", "thought": "基于数据生成报告" if self.language == "zh" else "Generate report from data", "llm": True})
+        yield {"type": "plan", "steps": plan_steps}
+
+        yield {"type": "step_start", "index": 0}
+        yield {"type": "step_done", "index": 0}
+
+        for i, (tool_name, desc) in enumerate(read_tools):
+            yield {"type": "step_start", "index": i + 1}
             obs = self.tools.execute_tool(tool_name, "none")
             if "NOT available" not in obs and "is empty" not in obs:
                 self.observations.append(f"[{tool_name}] {obs}")
+            yield {"type": "step_done", "index": i + 1}
 
         self.trajectory.append(
             f"Fast path: collected {len(self.observations)} data sources without ReAct loop"
@@ -246,15 +295,20 @@ class ReportAgent(PipelineComponent):
         logger.info(f"[ReportAgent] Fast path: collected {len(self.observations)} observations (0 LLM calls)")
 
     def _run_react_loop(self):
-        """Execute the ReAct reasoning loop with multi-action support. Yields thinking events."""
+        """Execute the ReAct reasoning loop with multi-action support. Yields plan + step events."""
         logger.info(f"[ReportAgent] Starting ReAct loop for session {self.session_id}")
 
         history = ""
+        plan_steps = [
+            {"action": "intent_analysis", "thought": "理解用户意图并规划" if self.language == "zh" else "Understand intent and plan", "llm": True},
+        ]
+        step_index = 0
+
+        yield {"type": "plan", "steps": plan_steps + [{"action": "generate", "thought": "生成回复" if self.language == "zh" else "Generate response", "llm": True}]}
+        yield {"type": "step_start", "index": 0}
 
         for step in range(MAX_REACT_STEPS):
             logger.info(f"[ReportAgent] Step {step + 1}/{MAX_REACT_STEPS}")
-
-            yield {"type": "thinking", "thought": f"Reasoning step {step + 1}...", "action": "llm_thinking"}
 
             prompt = self._build_react_prompt(history)
             llm_response = self._call_llm_sync(prompt)
@@ -263,7 +317,6 @@ class ReportAgent(PipelineComponent):
 
             self.trajectory.append(f"Step {step + 1}:\n{llm_response}")
 
-            # Extract the Thought line for display
             thought_match = re.search(r"Thought:\s*(.+?)(?:\n|$)", llm_response)
             thought_text = thought_match.group(1).strip() if thought_match else ""
 
@@ -273,22 +326,40 @@ class ReportAgent(PipelineComponent):
                 logger.warning("[ReportAgent] Could not parse action from LLM output. Forcing generate_final_report.")
                 break
 
+            if step == 0:
+                yield {"type": "step_done", "index": 0}
+                step_index = 1
+
             should_generate = False
             step_observations = []
 
             for action, action_input in actions:
+                if action == "generate_final_report":
+                    should_generate = True
+                    break
+
+                new_step = {"action": action, "thought": thought_text, "llm": step > 0}
+                plan_steps.append(new_step)
+
+                full_plan = plan_steps + [{"action": "generate", "thought": "基于数据生成报告" if self.language == "zh" else "Generate report from data", "llm": True}]
+                yield {"type": "plan_update", "steps": full_plan}
+
+                yield {"type": "step_start", "index": step_index}
                 logger.info(f"[ReportAgent] Action: {action}, Input: {action_input}")
-                yield {"type": "thinking", "thought": thought_text, "action": action}
 
                 observation = self.tools.execute_tool(action, action_input)
 
                 if observation == "__GENERATE_REPORT__":
                     logger.info("[ReportAgent] Agent decided to generate final report.")
+                    yield {"type": "step_done", "index": step_index}
+                    step_index += 1
                     should_generate = True
                     break
 
                 self.observations.append(f"[{action}] {observation}")
                 step_observations.append(f"Action: {action}\n{observation}")
+                yield {"type": "step_done", "index": step_index}
+                step_index += 1
 
             if should_generate:
                 break
@@ -352,9 +423,8 @@ class ReportAgent(PipelineComponent):
                 yield {"type": "token", "content": no_data_msg}
                 return
 
-            # Signal: data collection done, starting generation
-            generating_msg = "正在生成回复..." if self.language == "zh" else "Generating response..."
-            yield {"type": "thinking", "thought": generating_msg, "action": "generate"}
+            # Signal: data collection done, starting generation (last step in plan)
+            yield {"type": "step_start", "index": -1}
 
             # Phase 2: Generate response (streaming)
             if self.output_format_hint == "report":
@@ -366,11 +436,6 @@ class ReportAgent(PipelineComponent):
             else:
                 is_report = self._is_report_request()
                 logger.info(f"[ReportAgent] Intent: {'report' if is_report else 'chat'} (local keyword detection)")
-
-            if is_report:
-                output_prompt = self._build_report_prompt()
-            else:
-                output_prompt = self._build_chat_prompt()
 
             session_dir = self._get_session_dir()
             report_path = os.path.join(session_dir, "class_report.md")
@@ -390,19 +455,68 @@ class ReportAgent(PipelineComponent):
                 append=False,
             )
 
+            # Check if template-based report generation should be used
+            template_path = get_template_path(self.language, self.session_id) if is_report else None
+            use_template = is_report and template_path is not None
+
+            if use_template:
+                output_prompt = self._build_report_prompt(use_template=True)
+            elif is_report:
+                output_prompt = self._build_report_prompt(use_template=False)
+            else:
+                output_prompt = self._build_chat_prompt()
+
             # Clear report file
             StorageManager.save(report_path, "", append=False)
 
             first_token_time = None
 
             try:
-                streamer = self.model.generate(output_prompt, stream=True)
-                for token in streamer:
-                    if first_token_time is None:
-                        first_token_time = time.perf_counter()
+                if use_template:
+                    # Template mode: LLM generates JSON, we fill the template
+                    logger.info(f"[ReportAgent] Template mode: generating JSON to fill {template_path}")
+                    json_response = self._call_llm_sync(output_prompt)
+                    first_token_time = time.perf_counter()
 
-                    StorageManager.save_async(report_path, token, append=True)
-                    yield {"type": "token", "content": token}
+                    field_values = parse_llm_json_response(json_response)
+                    logger.info(f"[ReportAgent] Parsed {len(field_values)} fields from LLM response")
+
+                    # Fill the template and save as .docx
+                    docx_path = os.path.join(session_dir, "class_report.docx")
+                    fill_template(template_path, field_values, docx_path)
+
+                    # Also save a readable markdown summary for chat display
+                    summary_lines = []
+                    if self.language == "zh":
+                        summary_lines.append("# 课后总结报告\n")
+                    else:
+                        summary_lines.append("# Post-Class Summary Report\n")
+
+                    for key, value in field_values.items():
+                        if value and value not in ("暂无数据", "Data not available"):
+                            summary_lines.append(f"**{key}**: {value}\n")
+
+                    markdown_summary = "\n".join(summary_lines)
+                    StorageManager.save(report_path, markdown_summary, append=False)
+
+                    # Stream the summary to chat
+                    for token in markdown_summary:
+                        yield {"type": "token", "content": token}
+
+                    yield {"type": "step_done", "index": -1}
+                    yield {"type": "report_ready", "session_id": self.session_id}
+
+                else:
+                    # Streaming mode: LLM generates markdown directly
+                    streamer = self.model.generate(output_prompt, stream=True)
+                    for token in streamer:
+                        if first_token_time is None:
+                            first_token_time = time.perf_counter()
+
+                        StorageManager.save_async(report_path, token, append=True)
+                        yield {"type": "token", "content": token}
+
+                    yield {"type": "step_done", "index": -1}
 
             finally:
                 end = time.perf_counter()

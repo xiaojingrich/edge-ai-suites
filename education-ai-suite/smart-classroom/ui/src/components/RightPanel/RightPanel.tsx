@@ -3,7 +3,6 @@ import ConfigurationMetricsAccordion from "./ConfigurationMetricsAccordion";
 import ResourceUtilizationAccordion from "./ResourceUtilizationAccordion";
 import ClassStatisticsAccordion from './ClassEngagementAccordion';
 import PreValidatedModelsAccordion from "./PreValidatedModelsAccordion";
-import AgentChatAccordion from "./AgentChatAccordion";
 import "../../assets/css/RightPanel.css";
 
 interface RightPanelProps {
@@ -17,7 +16,6 @@ const RightPanel: React.FC<RightPanelProps> = ({ activeScreen }) => {
       <ResourceUtilizationAccordion activeScreen={activeScreen} />
       <div style={{ display: activeScreen === 'main' ? 'contents' : 'none' }}>
         <ClassStatisticsAccordion />
-        <AgentChatAccordion />
       </div>
       <PreValidatedModelsAccordion activeScreen={activeScreen} />
     </div>

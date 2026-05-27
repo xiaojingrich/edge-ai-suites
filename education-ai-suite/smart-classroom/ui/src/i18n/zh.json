@@ -347,6 +347,7 @@
     "send": "发送",
     "stop": "停止",
     "newConversation": "新对话",
-    "thinkingDone": "{{count}} 步已完成"
+    "thinkingDone": "{{count}} 步已完成",
+    "downloadReport": "下载 Word 报告"
   }
 }

@@ -346,6 +346,7 @@
     "send": "Send",
     "stop": "Stop",
     "newConversation": "New conversation",
-    "thinkingDone": "{{count}} steps completed"
+    "thinkingDone": "{{count}} steps completed",
+    "downloadReport": "Download Word Report"
   }
 }

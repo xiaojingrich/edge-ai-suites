@@ -1,54 +1,65 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { useAppSelector } from '../../redux/hooks';
-import { streamAgentChat, BASE_URL } from '../../services/api';
-import Accordion from '../common/Accordion';
+import { useAppSelector } from '../redux/hooks';
+import { streamAgentChat, BASE_URL } from '../services/api';
+import type { PlanStep } from '../services/api';
 import { useTranslation } from 'react-i18next';
-import '../../assets/css/AgentChat.css';
+import '../assets/css/AgentChat.css';
 
-interface ThinkingStep {
-  thought: string;
-  action: string;
+type StepStatus = 'pending' | 'running' | 'done';
+
+interface PlanState {
+  steps: PlanStep[];
+  statuses: StepStatus[];
 }
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
-  thinkingSteps?: ThinkingStep[];
+  plan?: PlanState;
   reportSessionId?: string;
 }
 
-const ThinkingBlock: React.FC<{ steps: ThinkingStep[]; isActive: boolean }> = ({ steps, isActive }) => {
+const PlanBlock: React.FC<{ plan: PlanState; isActive: boolean }> = ({ plan, isActive }) => {
   const [collapsed, setCollapsed] = useState(false);
   const { t } = useTranslation();
 
   useEffect(() => {
-    if (!isActive && steps.length > 0) {
+    if (!isActive && plan.steps.length > 0) {
       setCollapsed(true);
     }
-  }, [isActive, steps.length]);
+  }, [isActive, plan.steps.length]);
 
-  if (steps.length === 0) return null;
+  if (plan.steps.length === 0) return null;
+
+  const doneCount = plan.statuses.filter(s => s === 'done').length;
+  const totalCount = plan.steps.length;
 
   return (
-    <div className={`agent-thinking-block ${collapsed ? 'collapsed' : ''}`}>
+    <div className={`agent-plan-block ${collapsed ? 'collapsed' : ''}`}>
       <button
-        className="agent-thinking-toggle"
+        className="agent-plan-toggle"
         onClick={() => setCollapsed(!collapsed)}
       >
         {isActive && <span className="agent-thinking-indicator"></span>}
         <span>{isActive
-          ? steps[steps.length - 1]?.thought || 'Thinking...'
-          : t('agent.thinkingDone', { count: steps.length, defaultValue: '{{count}} steps completed' })
+          ? `${doneCount}/${totalCount} ` + t('agent.planProgress', 'steps')
+          : t('agent.planDone', { count: totalCount, defaultValue: '{{count}} steps completed' })
         }</span>
         <span className="agent-thinking-chevron">{collapsed ? '▶' : '▼'}</span>
       </button>
       {!collapsed && (
-        <ul className="agent-thinking-steps">
-          {steps.map((s, i) => (
-            <li key={i}>
-              <span className="agent-step-action">{s.action}</span>
-              {s.thought && <span className="agent-step-thought">{s.thought}</span>}
+        <ul className="agent-plan-steps">
+          {plan.steps.map((step, i) => (
+            <li key={i} className={`agent-plan-step agent-plan-step-${plan.statuses[i]}`}>
+              <span className="agent-plan-step-icon">
+                {plan.statuses[i] === 'done' && '✓'}
+                {plan.statuses[i] === 'running' && <span className="agent-thinking-indicator"></span>}
+                {plan.statuses[i] === 'pending' && '○'}
+              </span>
+              <span className="agent-plan-step-action">{step.action}</span>
+              {step.llm && <span className="agent-plan-step-llm">LLM</span>}
+              <span className="agent-plan-step-thought">{step.thought}</span>
             </li>
           ))}
         </ul>
@@ -57,7 +68,12 @@ const ThinkingBlock: React.FC<{ steps: ThinkingStep[]; isActive: boolean }> = ({
   );
 };
 
-const AgentChatAccordion: React.FC = () => {
+interface AgentChatDialogProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
   const { t } = useTranslation();
   const sessionId = useAppSelector(s => s.ui.sessionId);
 
@@ -65,14 +81,13 @@ const AgentChatAccordion: React.FC = () => {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
-  const [isThinking, setIsThinking] = useState(false);
+  const [activePlan, setActivePlan] = useState<PlanState | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, thinkingSteps]);
+  }, [messages, activePlan]);
 
   useEffect(() => {
     setMessages([]);
@@ -85,42 +100,68 @@ const AgentChatAccordion: React.FC = () => {
     setInput('');
     setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
     setIsStreaming(true);
-    setIsThinking(true);
-    setThinkingSteps([]);
+    setActivePlan(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
-    const collectedSteps: ThinkingStep[] = [];
+    let currentPlan: PlanState | null = null;
 
     try {
       for await (const event of streamAgentChat(sessionId, userMessage, conversationId, { signal: controller.signal })) {
-        if (event.type === 'agent_thinking') {
-          const step: ThinkingStep = { thought: event.thought || '', action: event.action || '' };
-          collectedSteps.push(step);
-          setThinkingSteps([...collectedSteps]);
-          if (event.conversationId && !conversationId) {
-            setConversationId(event.conversationId);
+        if (event.conversationId && !conversationId) {
+          setConversationId(event.conversationId);
+        }
+
+        if (event.type === 'agent_plan') {
+          const steps = event.steps || [];
+          currentPlan = { steps, statuses: steps.map(() => 'pending' as StepStatus) };
+          setActivePlan({ ...currentPlan });
+        } else if (event.type === 'agent_plan_update') {
+          const steps = event.steps || [];
+          if (currentPlan) {
+            const oldStatuses = currentPlan.statuses;
+            const newStatuses = steps.map((_, i) => i < oldStatuses.length ? oldStatuses[i] : 'pending' as StepStatus);
+            currentPlan = { steps, statuses: newStatuses };
+          } else {
+            currentPlan = { steps, statuses: steps.map(() => 'pending' as StepStatus) };
           }
+          setActivePlan({ ...currentPlan });
+        } else if (event.type === 'agent_step_start') {
+          if (currentPlan && event.index !== undefined) {
+            const idx = event.index === -1 ? currentPlan.statuses.length - 1 : event.index;
+            currentPlan.statuses[idx] = 'running';
+            setActivePlan({ ...currentPlan });
+          }
+        } else if (event.type === 'agent_step_done') {
+          if (currentPlan && event.index !== undefined) {
+            const idx = event.index === -1 ? currentPlan.statuses.length - 1 : event.index;
+            currentPlan.statuses[idx] = 'done';
+            setActivePlan({ ...currentPlan });
+            setMessages(prev => {
+              const last = prev[prev.length - 1];
+              if (last?.role === 'assistant' && last.plan) {
+                const updated = [...prev];
+                updated[updated.length - 1] = { ...last, plan: { ...currentPlan! } };
+                return updated;
+              }
+              return prev;
+            });
+          }
+        } else if (event.type === 'agent_thinking') {
+          // Legacy thinking events (from ReAct before plan is set) — ignored if plan already active
         } else if (event.type === 'agent_token' && event.token) {
-          if (isThinking) {
-            setIsThinking(false);
-          }
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
-            if (last.role === 'assistant' && last.thinkingSteps) {
+            if (last?.role === 'assistant' && last.plan) {
               updated[updated.length - 1] = { ...last, content: last.content + event.token };
             } else {
-              updated.push({ role: 'assistant', content: event.token, thinkingSteps: [...collectedSteps] });
-              setThinkingSteps([]);
+              updated.push({ role: 'assistant', content: event.token, plan: currentPlan || undefined });
+              setActivePlan(null);
             }
             return updated;
           });
-          if (event.conversationId && !conversationId) {
-            setConversationId(event.conversationId);
-          }
         } else if (event.type === 'report_ready') {
-          // Mark the last assistant message as having a downloadable report
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -130,32 +171,26 @@ const AgentChatAccordion: React.FC = () => {
             return updated;
           });
         } else if (event.type === 'error') {
-          setIsThinking(false);
           setMessages(prev => [
             ...prev,
-            { role: 'assistant', content: `Error: ${event.message}`, thinkingSteps: [...collectedSteps] },
+            { role: 'assistant', content: `Error: ${event.message}`, plan: currentPlan || undefined },
           ]);
-          setThinkingSteps([]);
-        } else if (event.type === 'done') {
-          if (event.conversationId && !conversationId) {
-            setConversationId(event.conversationId);
-          }
+          setActivePlan(null);
         }
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         setMessages(prev => [
           ...prev,
-          { role: 'assistant', content: `Connection error: ${err.message}`, thinkingSteps: [...collectedSteps] },
+          { role: 'assistant', content: `Connection error: ${err.message}`, plan: currentPlan || undefined },
         ]);
       }
     } finally {
       setIsStreaming(false);
-      setIsThinking(false);
-      setThinkingSteps([]);
+      setActivePlan(null);
       abortRef.current = null;
     }
-  }, [sessionId, isStreaming, conversationId, isThinking]);
+  }, [sessionId, isStreaming, conversationId]);
 
   const handleSend = () => {
     sendMessage(input.trim());
@@ -184,9 +219,28 @@ const AgentChatAccordion: React.FC = () => {
     t('agent.suggest4', '根据今天课程内容出5道测验题'),
   ];
 
+  if (!open) return null;
+
   return (
-    <Accordion title={t('agent.title', 'Class Report Agent')}>
-      <div className="agent-chat-container">
+    <div className="agent-dialog-overlay" onClick={onClose}>
+      <div className="agent-dialog" onClick={e => e.stopPropagation()}>
+        <div className="agent-dialog-header">
+          <span className="agent-dialog-title">{t('agent.title', 'Class Report Agent')}</span>
+          <div className="agent-dialog-header-actions">
+            {messages.length > 0 && (
+              <button
+                className="agent-new-conv-btn"
+                onClick={handleNewConversation}
+                disabled={isStreaming}
+                title={t('agent.newConversation', 'New conversation')}
+              >
+                +
+              </button>
+            )}
+            <button className="agent-dialog-close" onClick={onClose}>&times;</button>
+          </div>
+        </div>
+
         <div className="agent-chat-messages">
           {messages.length === 0 && !isStreaming && (
             <div className="agent-chat-welcome">
@@ -207,8 +261,8 @@ const AgentChatAccordion: React.FC = () => {
           )}
           {messages.map((msg, i) => (
             <React.Fragment key={i}>
-              {msg.role === 'assistant' && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (
-                <ThinkingBlock steps={msg.thinkingSteps} isActive={false} />
+              {msg.role === 'assistant' && msg.plan && msg.plan.steps.length > 0 && (
+                <PlanBlock plan={msg.plan} isActive={false} />
               )}
               <div className={`agent-chat-msg agent-chat-msg-${msg.role}`}>
                 <div className="agent-chat-msg-content">
@@ -230,23 +284,13 @@ const AgentChatAccordion: React.FC = () => {
               </div>
             </React.Fragment>
           ))}
-          {isThinking && thinkingSteps.length > 0 && (
-            <ThinkingBlock steps={thinkingSteps} isActive={true} />
+          {activePlan && activePlan.steps.length > 0 && (
+            <PlanBlock plan={activePlan} isActive={true} />
           )}
           <div ref={messagesEndRef} />
         </div>
 
         <div className="agent-chat-input-area">
-          {messages.length > 0 && (
-            <button
-              className="agent-new-conv-btn"
-              onClick={handleNewConversation}
-              disabled={isStreaming}
-              title={t('agent.newConversation', 'New conversation')}
-            >
-              +
-            </button>
-          )}
           <textarea
             className="agent-chat-input"
             value={input}
@@ -271,8 +315,8 @@ const AgentChatAccordion: React.FC = () => {
           )}
         </div>
       </div>
-    </Accordion>
+    </div>
   );
 };
 
-export default AgentChatAccordion;
+export default AgentChatDialog;
