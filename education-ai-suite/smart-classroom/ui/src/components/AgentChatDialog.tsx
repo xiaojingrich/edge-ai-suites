@@ -128,15 +128,19 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
           setActivePlan({ ...currentPlan });
         } else if (event.type === 'agent_step_start') {
           if (currentPlan && event.index !== undefined) {
-            const idx = event.index === -1 ? currentPlan.statuses.length - 1 : event.index;
-            currentPlan.statuses[idx] = 'running';
-            setActivePlan({ ...currentPlan });
+            const idx = event.index < 0 ? currentPlan.statuses.length + event.index : event.index;
+            if (idx >= 0 && idx < currentPlan.statuses.length) {
+              currentPlan.statuses[idx] = 'running';
+              setActivePlan({ ...currentPlan });
+            }
           }
         } else if (event.type === 'agent_step_done') {
           if (currentPlan && event.index !== undefined) {
-            const idx = event.index === -1 ? currentPlan.statuses.length - 1 : event.index;
-            currentPlan.statuses[idx] = 'done';
-            setActivePlan({ ...currentPlan });
+            const idx = event.index < 0 ? currentPlan.statuses.length + event.index : event.index;
+            if (idx >= 0 && idx < currentPlan.statuses.length) {
+              currentPlan.statuses[idx] = 'done';
+              setActivePlan({ ...currentPlan });
+            }
             setMessages(prev => {
               const last = prev[prev.length - 1];
               if (last?.role === 'assistant' && last.plan) {

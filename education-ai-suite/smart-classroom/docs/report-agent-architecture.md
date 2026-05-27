@@ -1,4 +1,4 @@
-# Smart Classroom Multi-Agent Architecture
+# Smart Classroom Report Agent — Architecture Document
 
 ## System Overview
 
@@ -16,13 +16,6 @@
 │  ├── classroom-homework   → POST /homework/... (future)                         │
 │  └── classroom-lesson-prep → POST /lesson-prep/... (future)                     │
 │                                                                                 │
-│  OpenClaw 职责:                                                                 │
-│  ├── 1. 理解用户问题                                                           │
-│  ├── 2. 选择正确的 Skill                                                       │
-│  ├── 3. 决定 output_format (report vs chat)                                    │
-│  ├── 4. 调用 Smart Classroom 对应 endpoint                                     │
-│  └── 5. 管理对话记忆、conversation_id                                          │
-│                                                                                 │
 │  ⚠️  只有用户问题经过 OpenClaw，原始课堂数据不出设备                           │
 │                                                                                 │
 └──────────────────────────────────────┬──────────────────────────────────────────┘
@@ -32,69 +25,356 @@
 │                    Smart Classroom (执行层, 不做路由)                             │
 │                                                                                 │
 │  API Endpoints:                                                                 │
+│  ├── POST /chat              ← 统一入口 (含 Intent Router)                      │
 │  ├── POST /agent/chat        ← 学情Agent (多轮对话, 支持 output_format)         │
 │  ├── POST /generate-report   ← 学情Agent (单次报告)                             │
 │  ├── GET  /report/{id}       ← 获取已生成的报告                                │
+│  ├── GET  /report/{id}/download ← 下载 Word 格式报告                           │
+│  ├── POST /report/template/upload ← 上传自定义报告模板                          │
 │  ├── POST /homework/...      ← 作业Agent (future)                              │
 │  └── POST /lesson-prep/...   ← 备课Agent (future)                              │
 │                                                                                 │
-│  Each Agent:                                                                    │
+│  Report Agent:                                                                  │
 │  ├── Local 7B LLM (Qwen2.5-7B-Instruct, OpenVINO)                             │
 │  ├── 只读取已有数据 (ReAct) + 分析推理 + 文本生成                               │
+│  ├── 工具自动计算统计指标 (语速、提问次数、密度等)                               │
+│  ├── 支持 Word 模板报告生成 (.docx)                                             │
 │  ├── 不生成原始数据 (ASR/Summary/Mindmap 由主 pipeline 完成)                    │
-│  ├── 不做意图分析 — output_format 由 OpenClaw 传入                              │
 │  └── 无数据时返回提示，不报错                                                   │
-│                                                                                 │
-│  Local Data (Private):                                                          │
-│  └── transcription.txt, summary.md, front_posture.txt, topics.json, ...         │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Report Agent 职责边界
+## Report Agent 双路径架构
 
-### 做什么 (Read + Analyze)
+Report Agent 有两条执行路径：**Fast Path**（快速路径）和 **ReAct Loop**（推理循环）。
 
-| 工具 | 类型 | 说明 |
+```
+┌────────────────────────────────────────────────────────────────┐
+│                     generate_report() 入口                       │
+│                                                                  │
+│  model.acquire_model()                                           │
+│        │                                                         │
+│        ▼                                                         │
+│  ┌─────────────────────────────────────┐                        │
+│  │  _can_use_fast_path()?              │                        │
+│  │                                     │                        │
+│  │  YES if:                            │                        │
+│  │  - 首次报告请求 (_is_report_request)│                        │
+│  │  - 已有报告 + 追问                  │                        │
+│  └───────┬─────────────────┬───────────┘                        │
+│      YES │                 │ NO                                  │
+│          ▼                 ▼                                     │
+│  ┌─────────────────┐  ┌─────────────────┐                      │
+│  │  Fast Path      │  │  ReAct Loop     │                      │
+│  │  0 LLM calls    │  │  LLM-guided     │                      │
+│  │  直接读全部数据  │  │  自主决定工具    │                      │
+│  └────────┬────────┘  └────────┬────────┘                      │
+│           │                    │                                 │
+│           └────────┬───────────┘                                │
+│                    ▼                                             │
+│  ┌─────────────────────────────────────┐                        │
+│  │  Phase 2: 生成阶段                  │                        │
+│  │                                     │                        │
+│  │  有模板 → LLM 输出 JSON → 填充 .docx│                        │
+│  │  无模板 → LLM 流式输出 Markdown      │                        │
+│  └─────────────────────────────────────┘                        │
+│                    │                                             │
+│  model.release_model()                                           │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Fast Path（快速路径 — 0 LLM 推理调用）
+
+适用条件：
+- 用户请求完整报告（关键词匹配）
+- 已有 `class_report.md` 且用户在追问
+
+执行过程：
+1. `intent_analysis` — 直接判定意图（无 LLM）
+2. 依次调用所有 READ 工具收集数据
+3. 进入生成阶段
+
+**优势**：数据收集阶段无 LLM 调用，仅在最终生成时使用一次 LLM。
+
+### ReAct Loop（推理循环 — LLM 引导）
+
+适用条件：
+- 具体问题（"参与度如何"、"出几道测验题"）
+- 需要 LLM 判断该收集哪些数据
+
+执行过程：
+1. `intent_analysis` — LLM 分析意图并规划
+2. LLM 逐步决定调用哪些工具（支持批量调用）
+3. 收集到足够数据后调用 `generate_final_report`
+4. 进入生成阶段
+
+最多 10 步，目标 3-5 步完成。
+
+---
+
+## 工具列表 (18 Tools)
+
+### READ 工具（只读取已有数据，无副作用）
+
+| # | 工具名 | 说明 | 计算统计 |
+|---|--------|------|----------|
+| 1 | `get_session_metadata` | 检查 session 状态：可用文件、时长 | — |
+| 2 | `get_class_report` | 读取已生成的报告 (`class_report.md`) | — |
+| 3 | `get_class_statistics` | 读取学生参与统计 (`va/class_statistics.json`) | — |
+| 4 | `get_class_summary` | 读取课堂摘要 (`summary.md`) | — |
+| 5 | `get_mindmap` | 读取思维导图 (`mindmap.mmd`) | — |
+| 6 | `get_topic_segmentation` | 读取主题分段 (`topics.json`) | — |
+| 7 | `get_transcription` | 读取原始转录 (`transcription.txt`) | — |
+| 8 | `get_teacher_transcription` | 读取教师转录 (`teacher_transcription.txt`) | ✅ 计算语速、提问次数 |
+| 9 | `get_content_segmentation` | 读取内容分段转录 (`content_segmentation_transcription.txt`) | ✅ 计算密度、低活跃时段 |
+| 10 | `get_memory` | 读取跨 session 历史记忆 | — |
+
+### MEMORY 工具
+
+| # | 工具名 | 说明 |
+|---|--------|------|
+| 11 | `save_memory` | 保存关键发现到持久化记忆 |
+
+### SKILL 工具（LLM + 数据组合分析）
+
+| # | 工具名 | 说明 |
+|---|--------|------|
+| 12 | `skill_engagement_analysis` | 参与度评分 + 模式分析 |
+| 13 | `skill_video_slice_summary` | 识别关键教学片段 |
+| 14 | `skill_content_analysis` | 教学目标与知识覆盖分析 |
+| 15 | `skill_ocr_board_analysis` | 板书/PPT 内容分析 |
+| 16 | `skill_quiz_generation` | 根据课堂内容生成 5 道测验题 |
+| 17 | `skill_teacher_behavior` | 教师行为与教学风格分析 |
+
+### CONTROL 工具
+
+| # | 工具名 | 说明 |
+|---|--------|------|
+| 18 | `generate_final_report` | 结束数据收集，进入生成阶段 |
+
+### 工具内计算（非 LLM）
+
+`get_teacher_transcription` 自动计算：
+- `total_sentences` — 总句数
+- `total_chars` — 总字符数
+- `question_count` — 提问次数（以"？"结尾的句子）
+- `audio_duration` — 音频时长
+- `speaking_speed` — 语速（字符/分钟）
+
+`get_content_segmentation` 自动计算：
+- `total_segments` — 总段数
+- `total_duration` — 总时长
+- `avg_segment_duration` — 平均段长
+- `density per 5-min` — 每 5 分钟的内容密度
+- `low_activity_periods` — 低活跃时段
+
+这些统计由工具代码直接计算，不消耗 LLM 调用。LLM 仅做定性分析和文本生成。
+
+---
+
+## Word 模板报告系统
+
+### 模板优先级
+
+```
+1. Session 自定义: {session_dir}/custom_report_template.docx
+2. Project 自定义: {project_dir}/report_template.docx
+3. 默认模板:       templates/report_template_{language}.docx
+```
+
+### 模板格式
+
+```
+.docx 文件中：
+- Heading 定义章节结构
+- {placeholder_name} 标记 LLM 需要填充的字段
+- 无占位符的文字保持不变
+```
+
+### 模板模式执行流程
+
+```
+[工具收集数据] → [提取模板结构] → [LLM 生成 JSON] → [填充模板] → [保存 .docx]
+                        │                 │                 │
+            extract_template_structure   build_template_fill_prompt   fill_template
+            返回 sections + all_fields   要求 LLM 按字段输出 JSON    替换占位符
+```
+
+1. `extract_template_structure()` — 解析 .docx，提取 sections + placeholder 字段列表
+2. `build_template_fill_prompt()` — 构建提示词，要求 LLM 对每个字段生成对应内容（JSON 格式）
+3. LLM 生成 JSON — `{"field1": "值", "field2": "值", ...}`
+4. `parse_llm_json_response()` — 容错 JSON 解析（处理 ```json 标记等）
+5. `fill_template()` — 将字段值替换到 .docx 模板中，保留原有格式
+
+### 无模板模式
+
+LLM 直接流式输出 Markdown → 保存为 `class_report.md` → 下载时转为 .docx
+
+### API 接口
+
+| Endpoint | 说明 |
+|----------|------|
+| `POST /report/template/upload` | 上传自定义 .docx 模板（替换项目级默认） |
+| `GET /report/{session_id}/download` | 下载报告，优先返回模板生成的 .docx，否则 md→docx 转换 |
+
+---
+
+## 前端 UI — 浮动对话框
+
+### UI 布局
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  Header Bar                                                         │
+│  [Record] [Upload]        通知区域        [🤖 Agent] [项目名]       │
+└────────────────────────────────────────────────────────────────────┘
+
+点击 [🤖 Agent] → 弹出浮动对话框:
+
+┌────────────────────────────────────────┐
+│  Class Report Agent          [+] [×]   │
+├────────────────────────────────────────┤
+│                                        │
+│  推荐问题:                             │
+│  ┌──────────────────────────────────┐  │
+│  │ 今天学生表现怎么样？              │  │
+│  │ 哪个时间段参与度最低？            │  │
+│  │ 帮我生成一份完整的课堂评估报告    │  │
+│  │ 根据今天课程内容出5道测验题       │  │
+│  └──────────────────────────────────┘  │
+│                                        │
+│  (对话流区域 — Plan 进度 + Markdown)    │
+│                                        │
+│  ┌─ Plan Progress ───────────────────┐ │
+│  │ ● 2/6 steps                       │ │
+│  │ ✓ intent_analysis                 │ │
+│  │ ✓ get_class_statistics            │ │
+│  │ ● get_class_summary        [LLM]  │ │
+│  │ ○ get_mindmap                     │ │
+│  │ ○ get_topic_segmentation          │ │
+│  │ ○ generate               [LLM]    │ │
+│  └────────────────────────────────────┘ │
+│                                        │
+│  (Markdown 渲染的回复内容)              │
+│  [Download Word Report]                 │
+│                                        │
+├────────────────────────────────────────┤
+│  [输入框]                    [发送]     │
+└────────────────────────────────────────┘
+```
+
+### Plan 进度显示
+
+Agent 执行时实时展示完整计划和进度：
+
+| 状态 | 图标 | 含义 |
 |------|------|------|
-| `get_session_metadata` | READ | 查看 session 有哪些已生成的文件 |
-| `get_class_report` | READ | 读取已生成的报告 (`class_report.md`)，追问时避免重新收集 |
-| `get_transcription` | READ | 读取 ASR 转录文本 |
-| `get_class_summary` | READ | 读取 AI 生成的课堂摘要 |
-| `get_mindmap` | READ | 读取已生成的思维导图 |
-| `get_topic_segmentation` | READ | 读取主题分段数据 |
-| `get_class_statistics` | READ | 读取 `va/class_statistics.json` (课后由 VA pipeline 停止时自动保存) |
-| `get_memory` | READ | 读取跨 session 历史记忆 |
-| `save_memory` | MEMORY | 保存分析发现供未来 session 使用 |
-| `skill_engagement_analysis` | SKILL | 基于 `class_statistics.json` 分析参与度 (通过 get_class_statistics 间接读取) |
-| `skill_content_analysis` | SKILL | 分析教学目标和知识覆盖 |
-| `skill_quiz_generation` | SKILL | 根据课堂内容生成测验题 |
-| `skill_teacher_behavior` | SKILL | 分析教师行为和教学风格 |
-| `skill_video_slice_summary` | SKILL | 识别关键教学片段 |
-| `skill_ocr_board_analysis` | SKILL | 分析板书/PPT 内容 |
-| `generate_final_report` | CONTROL | 结束数据收集，进入生成阶段 |
+| pending | ○ | 待执行 |
+| running | ● (动画) | 正在执行 |
+| done | ✓ | 已完成 |
+| [LLM] | 橙色徽章 | 该步骤使用大模型 |
 
-### 不做什么 (由主 Pipeline 在课中/课后完成)
+事件流：
+```
+plan        → 显示完整步骤列表（所有步骤初始为 pending）
+plan_update → 动态追加步骤（ReAct 模式，发现新需求时）
+step_start  → 将指定步骤标为 running
+step_done   → 将指定步骤标为 done
+```
 
-| 数据 | 谁生成 | 何时生成 |
-|------|--------|----------|
-| `transcription.txt` | ASR Pipeline | 课堂中 (实时) |
-| `summary.md` | Summarizer | 课后 (自动) |
-| `mindmap.mmd` | Mindmap Generator | 课后 (自动) |
-| `topics.json` | Content Segmentation | 课后 (自动) |
-| `va/front_posture.txt` | Video Analytics | 课堂中 (实时) |
-| `va/class_statistics.json` | VA Pipeline 停止时自动保存 | 课后 (停止 VA 时) |
+### 前端组件结构
 
-### 无数据处理
+```
+Header.tsx
+  └── [🤖 Agent] button (agent-nav-btn)
+      └── AgentChatDialog.tsx (浮动对话框)
+          ├── PlanBlock (计划进度组件)
+          ├── ReactMarkdown (回复渲染)
+          └── Download button (report_ready 时显示)
+```
 
-如果 session 目录中所有关键文件都不存在（ReAct 循环未收集到任何 observation），Agent 直接返回：
+---
 
-- 中文: "当前无课堂记录数据，请先完成一节课的录制。"
-- 英文: "No classroom recording data available. Please complete a class session first."
+## SSE 事件流协议
 
-如果部分数据缺失，Agent 跳过缺失部分，基于已有数据生成报告/回答。
+### 事件类型
+
+| 后端 type | 前端映射 | 说明 |
+|-----------|----------|------|
+| `plan` | `agent_plan` | 完整计划步骤列表 |
+| `plan_update` | `agent_plan_update` | 动态更新步骤（新增步骤） |
+| `step_start` | `agent_step_start` | 步骤开始执行 |
+| `step_done` | `agent_step_done` | 步骤执行完成 |
+| `token` | `agent_token` | 生成的文本 token |
+| `report_ready` | `report_ready` | 报告生成完毕，可下载 |
+| `thinking` | `agent_thinking` | 旧版思考事件（兼容） |
+
+### 数据格式 (JSON Lines)
+
+```json
+{"type": "plan", "steps": [{"action": "intent_analysis", "thought": "理解意图", "llm": false}, ...], "conversation_id": "conv_xxx"}
+{"type": "step_start", "index": 0, "conversation_id": "conv_xxx"}
+{"type": "step_done", "index": 0, "conversation_id": "conv_xxx"}
+{"type": "step_start", "index": 1, "conversation_id": "conv_xxx"}
+{"type": "step_done", "index": 1, "conversation_id": "conv_xxx"}
+...
+{"token": "根据课堂数据分析...", "error": "", "conversation_id": "conv_xxx"}
+{"type": "report_ready", "session_id": "20260526-xxx", "conversation_id": "conv_xxx"}
+```
+
+`index: -1` 表示最后一个步骤（生成阶段）。
+
+---
+
+## 多轮对话管理
+
+### ConversationManager
+
+```
+{session_dir}/.conversations/
+  └── conv_{timestamp}_{random}.json
+      {
+        "conversation_id": "conv_xxx",
+        "session_id": "...",
+        "messages": [
+          {"role": "user", "content": "...", "timestamp": "..."},
+          {"role": "assistant", "content": "...", "timestamp": "..."}
+        ],
+        "agent_observations": [
+          "[get_class_statistics] ...",
+          "[get_class_summary] ..."
+        ]
+      }
+```
+
+追问时：
+- 前端携带 `conversation_id`
+- 后端加载之前的 `agent_observations` 作为 `prior_observations`
+- Agent 不需重新收集数据（走 Fast Path: 读 `class_report.md`）
+
+---
+
+## Model Lifecycle
+
+```
+同一个 Qwen2.5-7B 模型实例，acquire/release 模式管理 GPU 内存：
+
+Pipeline 构造时不加载模型，只初始化 tokenizer。
+Agent 执行时:
+  acquire_model()  → 加载到 GPU
+  ReAct loop (0~10 次 LLM 调用)
+  Report generation (1 次 LLM 调用)
+  release_model()  → 从 GPU 卸载
+
+保护机制:
+  - audio_pipeline_lock: 防止与 ASR/Summary 并发访问 GPU
+  - Agent 启动前检测 lock 状态，如被占用返回 "请等待..."
+  - acquire/release 确保整个 Agent 执行期间模型不被反复加载/卸载
+    (避免 GPU 内存碎片化导致 "probability tensor contains inf/nan" 错误)
+```
 
 ---
 
@@ -102,7 +382,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│              What Goes Through OpenClaw                       │
+│              What Goes Through OpenClaw (可出设备)            │
 │                                                             │
 │  ✅ User's question text: "分析学生参与度"                  │
 │  ✅ output_format hint: "chat" or "report"                  │
@@ -118,322 +398,172 @@
 │  🔒 Generated reports and analysis results                  │
 │  🔒 Agent memory (historical observations)                  │
 │  🔒 OCR extracted content                                   │
+│  🔒 Word 报告文件 (.docx)                                  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## OpenClaw Provider Fallback (云端/本地)
+## 典型执行场景
 
-```jsonc
-// openclaw.json 配置:
+### 场景 1: 首次生成完整报告（Fast Path + 模板）
+
+```
+用户: "帮我生成一份完整的课堂评估报告"
+
+→ Fast Path (_is_report_request = true)
+→ Plan:
+  1. intent_analysis (无 LLM)
+  2. get_class_statistics
+  3. get_class_summary
+  4. get_mindmap
+  5. get_topic_segmentation
+  6. get_teacher_transcription  ← 自动计算语速、提问次数
+  7. get_content_segmentation  ← 自动计算密度、低活跃时段
+  8. generate [LLM]            ← LLM 生成 JSON
+  9. fill_template             ← 填充 Word 模板
+
+→ 输出: class_report.docx + class_report.md
+→ 前端显示 Markdown + [Download Word Report] 按钮
+```
+
+**LLM 调用次数**: 1 次（仅生成阶段）
+
+### 场景 2: 追问已有报告（Fast Path）
+
+```
+用户: "参与度最低的时间段是哪个？"
+
+→ Fast Path (class_report.md 存在)
+→ Plan:
+  1. intent_analysis (无 LLM)
+  2. get_class_report  ← 读已有报告
+  3. generate [LLM]    ← 基于报告回答问题
+
+→ 输出: 对话式简短回答
+```
+
+**LLM 调用次数**: 1 次
+
+### 场景 3: 具体问题（ReAct Loop）
+
+```
+用户: "根据今天课程内容出5道测验题"
+
+→ ReAct Loop (非报告请求，无已有报告覆盖此需求)
+→ Plan (动态):
+  1. intent_analysis [LLM]     ← LLM 分析意图
+  2. get_class_summary          ← LLM 决定需要摘要
+  3. generate [LLM]            ← 生成测验题
+
+→ 输出: 5 道选择题 (Markdown 格式)
+```
+
+**LLM 调用次数**: 2 次（意图分析 + 生成）
+
+### 场景 4: 无数据
+
+```
+用户: "分析学生参与度"
+
+→ 所有 READ 工具返回 "NOT available"
+→ observations == []
+→ 直接返回: "当前无课堂记录数据，请先完成一节课的录制。"
+
+→ 无 LLM 调用
+```
+
+---
+
+## 文件结构
+
+```
+smart-classroom/
+├── main.py                              ← FastAPI 启动入口 (port 8000)
+├── api/
+│   ├── endpoints.py                     ← HTTP endpoints
+│   └── llm_serving.py                   ← OpenAI-compatible /v1/chat/completions
+├── pipeline.py                          ← Pipeline factory (含 run_report)
+├── config.yaml                          ← 应用配置
+│
+├── components/
+│   ├── intent_router.py                 ← Intent Router (keyword/llm 模式)
+│   └── report_agent/                    ← 学情Agent
+│       ├── report_agent.py              ← ReAct loop + Fast Path + 流式生成
+│       ├── tools.py                     ← 18 工具 + 统计计算 + AgentMemory
+│       ├── prompts.py                   ← Prompt 模板 (ReAct/Report/Chat)
+│       ├── conversation.py              ← 多轮对话状态管理
+│       └── skills/                      ← 6 个分析技能
+│           ├── __init__.py              ← SKILL_REGISTRY
+│           ├── base_skill.py            ← BaseSkill ABC
+│           ├── engagement_analysis.py   ← 参与度分析
+│           ├── content_analysis.py      ← 内容分析
+│           ├── quiz_generation.py       ← 测验题生成
+│           ├── teacher_behavior.py      ← 教师行为分析
+│           ├── video_slice_summary.py   ← 关键片段识别
+│           └── ocr_board_analysis.py    ← 板书/PPT 分析
+│
+├── utils/
+│   ├── template_manager.py              ← Word 模板管理 (解析/填充)
+│   └── docx_export.py                   ← Markdown → Word 转换 (降级方案)
+│
+├── templates/
+│   ├── report_template_zh.docx          ← 默认中文模板 (27 个占位字段)
+│   └── report_template_en.docx          ← 默认英文模板
+│
+├── ui/src/
+│   ├── components/
+│   │   ├── Header/Header.tsx            ← 含 🤖 Agent 按钮
+│   │   └── AgentChatDialog.tsx          ← 浮动对话框 (PlanBlock + Chat)
+│   ├── services/api.ts                  ← streamAgentChat() + PlanStep 接口
+│   ├── assets/css/AgentChat.css         ← Agent UI 样式
+│   └── i18n/{en,zh}.json               ← 国际化 (agent.* 键)
+│
+├── dto/report_dto.py                    ← ReportRequest / AgentChatRequest DTO
+│
+└── docs/
+    └── report-agent-architecture.md     ← 本文档
+```
+
+---
+
+## API Endpoints
+
+| Endpoint | Method | 说明 | 调用方 |
+|----------|--------|------|--------|
+| `/chat` | POST | **统一入口** (含 Intent Router) | Frontend UI |
+| `/agent/chat` | POST | 学情Agent 多轮对话 | OpenClaw / Router |
+| `/generate-report` | POST | 单次报告生成 | Frontend / OpenClaw |
+| `/report/{session_id}` | GET | 获取已保存报告 (Markdown) | Frontend |
+| `/report/{session_id}/download` | GET | 下载 Word 报告 | Frontend |
+| `/report/template/upload` | POST | 上传自定义 .docx 模板 | Frontend |
+| `/v1/chat/completions` | POST | OpenAI 兼容 LLM 接口 | OpenClaw (本地 Provider) |
+
+### `/agent/chat` Request
+
+```json
 {
-  "gateway": {
-    "mode": "local",                         // local = 不暴露外网
-    "bind": "loopback",
-    "auth": { "mode": "token", "token": "..." }
-  },
-  "models": {
-    "mode": "merge",
-    "providers": {
-      "openai": {},                          // ← Provider A (云端)
-      "smart-classroom": {                   // ← Provider B (本地, 复用已有 7B 模型)
-        "baseUrl": "http://127.0.0.1:8000",
-        "apiKey": "local",
-        "api": "openai-completions",
-        "models": []
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "openai/gpt-4o",
-        "fallbacks": ["smart-classroom/Qwen2.5-7B-Instruct"]
-      },
-      "workspace": "/home/edge/.openclaw/workspace-classroom",
-      "skipBootstrap": true
-    },
-    "list": [
-      {
-        "id": "classroom",
-        "default": true,
-        "workspace": "/home/edge/.openclaw/workspace-classroom",
-        "model": {
-          "primary": "openai/gpt-4o",
-          "fallbacks": ["smart-classroom/Qwen2.5-7B-Instruct"]
-        },
-        "identity": {
-          "name": "学情助手",
-          "theme": "classroom analysis assistant",
-          "emoji": "📊"
-        },
-        "tools": {
-          "allow": ["web_fetch", "session_status"]
-        }
-      }
-    ]
-  }
+  "session_id": "20260526-143000-a1b2",     // 可选，不传则用最新 session
+  "message": "分析一下今天学生的参与度",
+  "output_format": "chat",                   // "report" | "chat" | null
+  "conversation_id": "conv_xxx"              // 可选，追问时携带
 }
 ```
 
-**本地 Provider 说明:**
-- Smart Classroom 已内置 OpenAI-compatible endpoint: `POST /v1/chat/completions`
-- 复用已加载的 Qwen2.5-7B-Instruct 模型，无需额外安装其他模型服务
-- 仅供外部调用方 (OpenClaw) 使用；Smart Classroom 内部组件直接调用 Python 模型实例（避免重复 load/unload 开销）
-- 通过 acquire/release 模式与 ReportAgent 共享 GPU，不会冲突
-  (OpenClaw 意图识别 → release → HTTP 到 /agent/chat → ReportAgent acquire，天然串行)
+### `/agent/chat` Response (Streaming JSON Lines)
 
-**Failover 机制 (OpenClaw 内置):**
-- 云端: `openai/gpt-4o` 读 SKILL.md → 精准判断意图 + output_format → 调 /agent/chat
-- 本地: 自动切 `smart-classroom/Qwen2.5-7B-Instruct` → 基本判断意图 → 调 /agent/chat
-- 触发条件: 网络不可达、HTTP 401/403/429、请求超时
-- 恢复: 带 cooldown + exponential backoff 自动切回 primary
-- "意图识别" = 选择匹配的 SKILL.md + 决定 output_format，不是独立的路由组件
-
----
-
-## Report Agent 完整调用链
-
-以 OpenClaw 收到 "分析学生参与度" 为例：
-
-```
-用户 → OpenClaw
-       │
-       ├── LLM 读取 classroom-report SKILL.md
-       ├── 判断: 这是学情问题, output_format = "chat"
-       └── 执行 Skill 中的调用指令:
-           curl POST http://localhost:8000/agent/chat
-           body: {message: "分析学生参与度", output_format: "chat"}
-           (session_id 未传, 由后端自动取最新)
-
-│
-├── api/endpoints.py: agent_chat()
-│   ├── session_id = request.session_id or get_latest_session_id()
-│   ├── ConversationManager.create_conversation() → conv_id
-│   ├── conv_manager.add_message(conv_id, "user", message)
-│   │
-│   └── Pipeline(session_id).run_report(query, output_format="chat")
-│       │
-│       └── ReportAgent(session_id, user_query, output_format="chat")
-│           │
-│           ├── model.acquire_model()  ← 加载 7B 到 GPU
-│           │
-│           ├── _run_react_loop()  ← PHASE 1: 数据收集 (max 10, 目标 3-5 步)
-│           │   │
-│           │   ├── Step 1: LLM → "查 session metadata"
-│           │   │   └── tools.execute_tool("get_session_metadata")
-│           │   │       → 发现 class_report.md 不存在, 但有 VA 数据
-│           │   │
-│           │   ├── Step 2: LLM → "有 VA 数据，查统计"
-│           │   │   └── tools.execute_tool("get_class_statistics")
-│           │   │
-│           │   ├── Step 3: LLM → "数据够了"
-│           │   │   └── tools.execute_tool("generate_final_report") → break
-│           │   │
-│           │   (如果 class_report.md 已存在且是追问:
-│           │    Step 2: get_class_report → Step 3: generate, 仅 3 步)
-│           │
-│           ├── Output Format Decision  ← PHASE 1.5
-│           │   output_format_hint == "chat" (from OpenClaw)
-│           │   → _build_chat_prompt(observations)
-│           │
-│           ├── model.generate(prompt, stream=True)  ← PHASE 2
-│           │   └── yield tokens → SSE → OpenClaw → 用户
-│           │
-│           └── model.release_model()  ← 释放 GPU
-│
-└── StreamingResponse → OpenClaw → 用户看到结果
-```
-
-### 文件级调用关系
-
-```
-api/endpoints.py
-  └── POST /agent/chat (entry point, called by OpenClaw)
-      │
-      └── pipeline.py
-          └── run_report(query, output_format)
-              │
-              └── components/report_agent/
-                  ├── report_agent.py        ← ReAct 主循环 + 流式生成
-                  │   ├── _run_react_loop()  ← 7B 自主决定调哪些工具
-                  │   └── generate_report()  ← acquire → react → generate → release
-                  │
-                  ├── tools.py               ← 16 个工具 (READ/MEMORY/SKILL/CONTROL)
-                  │   └── execute_tool(name) → observation string
-                  │
-                  ├── skills/                ← 6 个 LLM 分析技能
-                  │   ├── engagement_analysis.py
-                  │   ├── quiz_generation.py
-                  │   ├── content_analysis.py
-                  │   ├── ocr_board_analysis.py
-                  │   ├── video_slice_summary.py
-                  │   └── teacher_behavior.py
-                  │
-                  ├── prompts.py             ← Prompt 模板
-                  │   ├── REACT_SYSTEM_PROMPT ← ReAct 循环用
-                  │   ├── REPORT_GENERATION_PROMPT ← output_format="report" 时用
-                  │   └── CHAT_RESPONSE_PROMPT    ← output_format="chat" 时用
-                  │
-                  └── conversation.py        ← 多轮对话管理
+```json
+{"type": "plan", "steps": [...], "conversation_id": "conv_xxx"}
+{"type": "step_start", "index": 0, "conversation_id": "conv_xxx"}
+{"type": "step_done", "index": 0, "conversation_id": "conv_xxx"}
+{"token": "根据课堂数据...", "error": "", "conversation_id": "conv_xxx"}
+{"type": "report_ready", "session_id": "xxx", "conversation_id": "conv_xxx"}
 ```
 
 ---
 
-## ReAct Execution Flow
-
-```
-┌──────────────────────────┐
-│  model.acquire_model()   │  ← Load 7B model ONCE
-└────────┬─────────────────┘
-         │
-         ▼
-╔══════════════════════════════════════════════════════════════╗
-║              PHASE 1: ReAct Loop (读取已有数据)               ║
-║                                                              ║
-║  7B 模型的职责: 只读取已有数据 + 分析，不生成原始数据        ║
-║                                                              ║
-║  Step N (max 10, 目标 3-5 步):                               ║
-║  1. Build prompt (system + tool_descriptions + history)       ║
-║  2. LLM generate (non-streaming, reuses held model)          ║
-║  3. Parse action (regex: "Action: xxx\nAction Input: yyy")   ║
-║     ├── Success → execute tool                               ║
-║     └── Parse fail → break to Phase 2                        ║
-║  4. Execute tool (ToolRegistry)                              ║
-║     ├── "generate_final_report" → break                      ║
-║     ├── READ → return existing file data                     ║
-║     ├── SKILL → LLM analysis on collected data               ║
-║     └── MEMORY → save/retrieve cross-session knowledge       ║
-║  5. Store observation, append to history, loop               ║
-║                                                              ║
-║  效率优化 (Prompt 引导 agent 减少无用步骤):                  ║
-║  ├── 首次报告: metadata → 批量收集 → generate (3-5步)       ║
-║  ├── 追问已有报告: metadata → get_class_report → generate    ║
-║  ├── 具体问题: metadata → 1-2个工具 → generate              ║
-║  └── 重新生成: 用户明确要求时走完整收集流程                  ║
-║                                                              ║
-╚════════════════════════════╤═════════════════════════════════╝
-                             │
-                             ▼
-┌────────────────────────────────────────────────────────────┐
-│  No Data Check:                                            │
-│                                                            │
-│  observations == [] → 返回 "无课堂记录数据" → 结束         │
-│  observations有数据 → 继续 Phase 2                         │
-└────────────────────────────┬───────────────────────────────┘
-                             │
-                             ▼
-┌────────────────────────────────────────────────────────────┐
-│  Output Format (由 OpenClaw 决定, 传入 output_format):      │
-│                                                            │
-│  "report" → _build_report_prompt() → 结构化报告            │
-│  "chat"   → _build_chat_prompt()   → 简短对话式回答        │
-│  None     → _is_report_request()   → 关键词 fallback       │
-│             (仅当 output_format 未传时才触发)              │
-└────────────────────────────┬───────────────────────────────┘
-                             │
-                             ▼
-╔══════════════════════════════════════════════════════════════╗
-║          PHASE 2: Response Generation (Streaming)            ║
-║                                                              ║
-║  LLM streaming → yield tokens → SSE → OpenClaw → 用户      ║
-║                → save to class_report.md                     ║
-╚════════════════════════════╤═════════════════════════════════╝
-                             │
-                             ▼
-┌────────────────────────────────────────────────────────────┐
-│  model.release_model()   ← Free 7B from GPU memory         │
-│  Save trajectory + metrics                                  │
-└────────────────────────────────────────────────────────────┘
-```
-
-### 典型场景步骤对比
-
-| 场景 | ReAct 步骤 | 说明 |
-|------|-----------|------|
-| 首次生成完整报告 | 5步 | metadata → statistics → summary → mindmap → topics → generate |
-| 追问已有报告 ("参与度如何") | 3步 | metadata → get_class_report → generate |
-| 具体问题 ("出几道题") | 3步 | metadata → get_class_summary → generate |
-| 重新生成报告 | 5步 | metadata → 重新收集所有数据 → generate |
-| 无数据 | 1步 | metadata → 无文件 → 返回提示 |
-
----
-
-## Model Lifecycle (共享 7B 模型)
-
-```
-同一个 Qwen2.5-7B 模型实例被两个场景共享:
-
-场景 A: OpenClaw 路由 (通过 /v1/chat/completions)
-  acquire → generate(~200 tokens, 路由判断) → release
-  耗时: ~2-3s
-
-场景 B: ReportAgent 分析 (通过 pipeline 内部调用)
-  acquire → Step1~N think + Report stream → release
-  耗时: ~30-60s
-
-时间线 (天然串行，不冲突):
-  ┌──────────┐         ┌──────────────────────────────────────┐
-  │ OpenClaw │         │           ReportAgent                 │
-  │  路由    │         │  ReAct loop + report generation       │
-  │ acquire  │         │  acquire                              │
-  │ generate │────────→│  think → think → ... → stream         │
-  │ release  │         │  release                              │
-  └──────────┘         └──────────────────────────────────────┘
-       2-3s                         30-60s
-
-  OpenClaw 先完成路由并释放模型，然后 HTTP 请求到达 /agent/chat,
-  ReportAgent 才开始 acquire。两者不会同时持有模型。
-
-保护机制:
-  - audio_pipeline_lock 防止并发访问
-  - /v1/chat/completions 检测 lock 状态，busy 时返回 429
-```
-
----
-
-## 调用入口: OpenClaw vs Frontend vs Intent Router
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  入口 A: OpenClaw (命令行/语音对话)                          │
-│                                                             │
-│  用户 → OpenClaw → POST /agent/chat                         │
-│  {message: "分析参与度", output_format: "chat"}             │
-│  session_id 不传 → 自动用最新活跃 session                   │
-│  OpenClaw 负责意图识别 + output_format 决策                  │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│  入口 B: Frontend + Intent Router (无 OpenClaw 时)          │
-│                                                             │
-│  用户 → UI → POST /chat (统一入口)                          │
-│  {message: "生成课堂报告"}                                  │
-│  Intent Router 自动判断:                                     │
-│    → agent = "report", output_format = "report"             │
-│    → 内部调用 /agent/chat                                    │
-│                                                             │
-│  配置 (config.yaml):                                        │
-│    router:                                                  │
-│      enabled: true                                          │
-│      mode: keyword  # keyword (快, 无LLM) | llm (准, 用7B) │
-│                                                             │
-│  router.enabled = false 时, /chat 等同于 /agent/chat        │
-│  (前端需自行传 output_format)                                │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│  入口 C: Frontend 直接调用 (跳过 Router)                    │
-│                                                             │
-│  前端明确知道要什么 → POST /agent/chat                       │
-│  {session_id: "20260526-143000-a1b2", message: "...",       │
-│   output_format: "report"}                                  │
-│  适用场景: UI 按钮明确对应功能 (如"生成报告"按钮)           │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Intent Router 架构
+## Intent Router（无 OpenClaw 时）
 
 ```
 POST /chat {message: "..."}
@@ -450,321 +580,109 @@ POST /chat {message: "..."}
 │  │   ├── agent="homework" → 501 (future)
 │  │   └── agent="lesson_prep" → 501 (future)
 │  │
-│  └── No → 直接调用 /agent/chat (需前端传 output_format)
+│  └── No → 直接调用 /agent/chat
 └─────────────────────────────────┘
 ```
 
-### 后续扩展路径
+---
 
-当新 Agent 上线时:
-1. 在 `components/intent_router.py` 中添加新 agent 的关键词模式
-2. 实现新 agent 的 endpoint (如 `/homework/chat`)
-3. 在 `/chat` 中添加路由分支
-4. 如果部署了 OpenClaw，添加对应 SKILL.md 即可自动路由
+## 不做什么（由主 Pipeline 在课中/课后完成）
+
+| 数据 | 谁生成 | 何时生成 |
+|------|--------|----------|
+| `transcription.txt` | ASR Pipeline | 课堂中 (实时) |
+| `teacher_transcription.txt` | ASR Pipeline (Speaker Diarization) | 课堂中 |
+| `content_segmentation_transcription.txt` | ASR Pipeline | 课堂中 |
+| `summary.md` | Summarizer | 课后 (自动) |
+| `mindmap.mmd` | Mindmap Generator | 课后 (自动) |
+| `topics.json` | Content Segmentation | 课后 (自动) |
+| `va/class_statistics.json` | VA Pipeline 停止时自动保存 | 课后 |
+| `va/front_posture.txt` | Video Analytics | 课堂中 (实时) |
+
+Report Agent **只读取**这些已有数据，绝不触发生成。
 
 ---
 
-## API Endpoints
+## Skill 技能系统
 
-| Endpoint | Method | Description | Called By |
-|----------|--------|-------------|-----------|
-| `/chat` | POST | **统一入口** (含 Intent Router) | Frontend UI |
-| `/v1/chat/completions` | POST | OpenAI 兼容 LLM 接口 | OpenClaw (本地 Provider) |
-| `/agent/chat` | POST | 学情Agent 多轮对话 (直接调用) | OpenClaw / `/chat` router |
-| `/generate-report` | POST | 单次报告生成 | OpenClaw / Frontend |
-| `/report/{session_id}` | GET | 获取已保存报告 | Frontend |
+Skills 是高级分析能力，组合 READ 工具 + LLM 推理：
 
-### `/agent/chat` Request/Response
+```python
+class BaseSkill(ABC):
+    def __init__(self, session_id, tools, model):
+        ...
 
-**Request (from OpenClaw, session_id 可选):**
-```json
+    def execute(self, context=None) -> dict:
+        # 返回: {"status": "success"|"partial"|"unavailable",
+        #        "result": {...},
+        #        "summary": "一行总结"}
+        ...
+
+    def _call_llm(self, prompt) -> str:
+        # 辅助方法: 调用 LLM 做分析推理
+        ...
+```
+
+### 示例: EngagementAnalysisSkill
+
+```
+1. 调用 get_class_statistics 获取原始数据
+2. 计算: interactions_per_student = (raise + stand) / students
+3. 判定: High (≥3) / Medium (≥1) / Low (<1)
+4. (可选) 调用 LLM 做深度模式分析
+5. 返回结构化结果 + 一行摘要
+```
+
+---
+
+## 跨 Session 记忆系统
+
+```
+{project_dir}/.agent_memory/memory.jsonl
+
+每行一条记录:
+{"session_id": "...", "timestamp": "...", "category": "observation", "content": "..."}
+```
+
+- `save_memory`: Agent 在生成报告前保存关键发现
+- `get_memory`: 需要趋势分析或跨课时对比时调用
+- 支持关键词搜索，返回最近 20 条相关记录
+
+---
+
+## Performance Metrics
+
+每次 Agent 执行后自动保存性能数据：
+
+```
+{session_dir}/performance_metrics.csv
+
+- performance.report_react_steps   ← ReAct 步数
+- performance.report_react_time    ← 数据收集耗时
+- performance.report_generation_time ← 报告生成耗时
+- performance.report_total_time    ← 总耗时
+- performance.report_ttft          ← 首 token 时间
+```
+
+同时保存完整推理轨迹：
+```
+{session_dir}/report_agent_trajectory.json
+
 {
-  "message": "分析一下今天学生的参与度",
-  "output_format": "chat"
+  "session_id": "...",
+  "user_query": "...",
+  "steps": 5,
+  "observations_count": 6,
+  "trajectory": ["Step 1: ...", "Step 2: ..."],
+  "observations": ["[get_class_statistics] ...", ...]
 }
 ```
-
-**Request (from Frontend, 指定 session):**
-```json
-{
-  "session_id": "20260526-143000-a1b2",
-  "message": "分析一下今天学生的参与度",
-  "output_format": "chat",
-  "conversation_id": null
-}
-```
-
-**session_id 解析逻辑:**
-- 传了 → 使用指定 session
-- 没传 → 从 SessionState 取最新活跃 session
-- 无活跃 session → 返回 404 "No session found"
-
-**Response (streaming JSON lines):**
-```json
-{"token": "根据视频分析数据...", "error": "", "conversation_id": "conv_xxx"}
-{"token": "学生平均参与度为...", "error": "", "conversation_id": "conv_xxx"}
-```
-
----
-
-## OpenClaw Setup Guide
-
-### Prerequisites
-
-- Node.js 22.19+ 或 Node 24
-- 至少一个 LLM Provider (云端 API key 或 Smart Classroom 本地 7B)
-- Smart Classroom 服务已启动 (`localhost:8000`，同时提供 `/v1/chat/completions`)
-
-### Step 1: 安装 OpenClaw
-
-```bash
-npm install -g openclaw@latest
-openclaw onboard --install-daemon
-```
-
-### Step 2: 配置 Provider 和 Agent
-
-编辑 `~/.openclaw/.env`:
-```bash
-OPENAI_API_KEY=sk-...   # 云端时用 (本地时可不配)
-```
-
-编辑 `~/.openclaw/openclaw.json`:
-```json
-{
-  "gateway": {
-    "mode": "local",
-    "bind": "loopback",
-    "auth": {
-      "mode": "token",
-      "token": "your-secret-token"
-    }
-  },
-  "models": {
-    "mode": "merge",
-    "providers": {
-      "openai": {},
-      "smart-classroom": {
-        "baseUrl": "http://127.0.0.1:8000",
-        "apiKey": "local",
-        "api": "openai-completions",
-        "models": []
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "openai/gpt-4o",
-        "fallbacks": ["smart-classroom/Qwen2.5-7B-Instruct"]
-      },
-      "skipBootstrap": true
-    },
-    "list": [
-      {
-        "id": "classroom",
-        "default": true,
-        "workspace": "~/.openclaw/workspace-classroom",
-        "model": {
-          "primary": "openai/gpt-4o",
-          "fallbacks": ["smart-classroom/Qwen2.5-7B-Instruct"]
-        },
-        "identity": {
-          "name": "学情助手",
-          "theme": "classroom analysis assistant",
-          "emoji": "📊"
-        },
-        "tools": {
-          "allow": ["web_fetch", "session_status"]
-        }
-      }
-    ]
-  }
-}
-```
-
-> **注意**: 本地 fallback 直接使用 Smart Classroom 服务 (`localhost:8000/v1/chat/completions`)，
-> 复用已加载的 Qwen2.5-7B-Instruct 模型，无需额外模型服务。
-
-### Step 3: 添加 Skills
-
-```bash
-mkdir -p ~/.openclaw/workspace-classroom/skills
-cp -r /path/to/smart-classroom/openclaw-skills/* ~/.openclaw/workspace-classroom/skills/
-```
-
-目录结构:
-```
-~/.openclaw/
-├── .env                           ← API keys
-├── openclaw.json                  ← Agent + Provider 配置
-└── workspace-classroom/
-    └── skills/
-        ├── classroom-report/SKILL.md      ← 学情Agent
-        ├── classroom-homework/SKILL.md    ← 作业Agent (future)
-        └── classroom-lesson-prep/SKILL.md ← 备课Agent (future)
-```
-
-### Step 4: 启动
-
-```bash
-# 启动 OpenClaw
-openclaw gateway start
-openclaw gateway status
-openclaw skills list  # 验证 skills 加载
-
-# 启动 Smart Classroom
-cd /path/to/smart-classroom
-python main.py  # localhost:8000
-```
-
-### Step 5: 验证
-
-```bash
-# 健康检查
-curl http://localhost:8000/health
-
-# 通过 OpenClaw 对话测试
-openclaw chat "帮我分析今天课堂的学生参与度"
-```
-
----
-
-## 概念对照
-
-| 概念 | 作用 | 位置 |
-|------|------|------|
-| **Provider** | LLM 来源 (OpenAI / Smart Classroom 本地) | OpenClaw `openclaw.json` |
-| **Agent** | 助手实例 (workspace + model) | OpenClaw `openclaw.json` |
-| **Skill (SKILL.md)** | 教 Agent 调哪个 API、传什么参数 | `~/.openclaw/workspace-classroom/skills/` |
-| **Report Agent** | 学情分析执行器 (ReAct + 7B) | Smart Classroom Python code |
-| **output_format** | 输出格式 hint (report/chat) | OpenClaw → Smart Classroom API param |
-| **/v1/chat/completions** | 本地 LLM 服务 (OpenAI 兼容) | Smart Classroom `api/llm_serving.py` |
-
----
-
-## File Structure
-
-```
-smart-classroom/
-├── main.py                        ← FastAPI 启动入口 (port 8000)
-├── api/
-│   ├── endpoints.py               ← HTTP endpoints (called by OpenClaw / Frontend)
-│   └── llm_serving.py             ← OpenAI-compatible /v1/chat/completions (本地 Provider)
-├── pipeline.py                    ← Pipeline factory
-├── config.yaml                    ← App configuration (含 router 开关)
-│
-├── components/intent_router.py    ← Intent Router (keyword/llm 模式, 替代 OpenClaw 路由)
-│
-├── components/report_agent/       ← 学情Agent (implemented)
-│   ├── report_agent.py            ← ReAct loop + streaming generation
-│   ├── tools.py                   ← 16 tools (READ/MEMORY/SKILL/CONTROL) + AgentMemory
-│   ├── prompts.py                 ← All prompt templates (效率优化: 引导 agent 3-5步完成)
-│   ├── conversation.py            ← Multi-turn state manager
-│   └── skills/                    ← 6 analysis skills
-│
-├── ui/                            ← Frontend (React + TypeScript + Vite)
-│   ├── src/components/RightPanel/
-│   │   └── AgentChatAccordion.tsx ← 学情Agent 对话界面 (调 POST /chat)
-│   ├── src/services/api.ts        ← streamAgentChat() → POST /chat (经 Intent Router)
-│   ├── src/i18n/{en,zh}.json      ← 国际化 (agent.* 键)
-│   └── dist/                      ← 构建产物, 由 FastAPI StaticFiles 提供
-│
-├── openclaw-skills/               ← SKILL.md files for OpenClaw
-│   ├── classroom-report/SKILL.md
-│   ├── classroom-homework/SKILL.md
-│   └── classroom-lesson-prep/SKILL.md
-│
-└── docs/
-    └── report-agent-architecture.md  ← This document
-```
-
----
-
-## Frontend UI — 学情Agent 对话界面
-
-```
-┌─────────────────────────────────────────────┐
-│  学情Agent                                   │
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │ (对话流, 支持 markdown 渲染)            │  │
-│  │                                        │  │
-│  │ 推荐问题 (首次进入时显示):              │  │
-│  │ ┌────────────────────────────────────┐ │  │
-│  │ │ 今天学生表现怎么样？                │ │  │
-│  │ ├────────────────────────────────────┤ │  │
-│  │ │ 哪个时间段参与度最低？              │ │  │
-│  │ ├────────────────────────────────────┤ │  │
-│  │ │ 帮我生成一份完整的课堂评估报告      │ │  │
-│  │ ├────────────────────────────────────┤ │  │
-│  │ │ 根据今天课程内容出5道测验题         │ │  │
-│  │ └────────────────────────────────────┘ │  │
-│  │                                        │  │
-│  │ (点击推荐问题 → 直接发送, 非填入输入框) │  │
-│  └────────────────────────────────────────┘  │
-│                                              │
-│  [+] [输入框: 输入问题...]      [发送/停止]  │
-│                                              │
-└─────────────────────────────────────────────┘
-
-[+] = 开始新对话 (清空历史, 重置 conversation_id)
-推荐问题 = 点击后直接发送, agent 自主决定收集哪些数据
-```
-
-### 前端交互流程
-
-```
-用户进入页面 → 看到推荐问题列表
-  │
-  ├── 点击推荐问题 或 自由输入
-  │
-  ▼
-POST /chat {message: "今天学生表现怎么样？", session_id: "..."}
-  │
-  ├── Intent Router (keyword): agent=report, output_format=chat
-  │
-  ▼
-/agent/chat → ReportAgent ReAct loop → 流式返回
-  │
-  ▼
-前端实时渲染 markdown (表格、列表、标题)
-  │
-  ├── 用户追问 (自动携带 conversation_id)
-  │   POST /chat {message: "再详细看看", conversation_id: "conv_xxx"}
-  │   → agent 读 class_report.md → 直接回答 (3步)
-  │
-  └── 用户点 [+] → 清空对话, 开始新话题
-```
-
-### 设计原则
-
-- **以对话为主入口**, 不设固定功能按钮 — 体现 agent 的自主性
-- 推荐问题是引导, 不是限制 — 用户可以问任何课堂相关问题
-- 没有"生成报告"按钮, 用户通过自然语言表达需求, router 自动判断 output_format
-- 追问不需要重新收集数据 — agent 读已有报告回答
 
 ---
 
 ## Adding a New Agent
 
-To add a new agent (e.g., homework_agent):
-
-1. **Smart Classroom (后端):**
-   - Create `components/homework_agent/` with agent logic
-   - Add API endpoint: `POST /homework/chat`
-   - Expose via `pipeline.py`
-
-2. **Intent Router (本地路由):**
-   - 在 `components/intent_router.py` 中添加 `_HOMEWORK_PATTERNS` 关键词
-   - 在 `api/endpoints.py` 的 `/chat` endpoint 中添加路由分支
-
-3. **Frontend (UI):**
-   - 在推荐问题中添加作业相关提示
-   - 或: 新增独立的作业 Agent 对话面板
-
-4. **OpenClaw (可选, 有网络时):**
-   - `openclaw-skills/classroom-homework/SKILL.md` already exists
-   - Update it: change status from "Under Development" to active
-   - Add the correct API call (`POST /homework/chat`)
-   - OpenClaw 部署后自动路由, 无需改代码
+1. **后端**: 创建 `components/{new_agent}/` + API endpoint
+2. **Intent Router**: 在 `intent_router.py` 添加关键词模式，在 `/chat` 添加路由分支
+3. **前端**: 新增对话面板或复用现有 AgentChatDialog
+4. **OpenClaw** (可选): 添加 `openclaw-skills/{agent}/SKILL.md`

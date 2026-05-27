@@ -102,7 +102,7 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-    def _build_report_prompt(self, use_template: bool = False) -> str:
+    def _build_report_prompt(self, use_template: bool = False, structured_stats: str = None) -> str:
         """Build the final report generation prompt with all collected observations."""
         observations_text = "\n\n---\n\n".join(self.observations)
 
@@ -110,7 +110,10 @@ class ReportAgent(PipelineComponent):
             template_path = get_template_path(self.language, self.session_id)
             if template_path:
                 template_structure = extract_template_structure(template_path)
-                user_content = build_template_fill_prompt(template_structure, observations_text, self.language)
+                user_content = build_template_fill_prompt(
+                    template_structure, observations_text, self.language,
+                    structured_stats=structured_stats,
+                )
                 system_msg = ("你是一个专业的教育分析师。根据提供的数据填充报告模板字段，输出JSON。"
                               if self.language == "zh"
                               else "You are a professional educational analyst. Fill report template fields based on provided data. Output JSON.")
@@ -181,6 +184,126 @@ class ReportAgent(PipelineComponent):
             tokenize=False,
             add_generation_prompt=True,
         )
+
+    def _extract_structured_stats(self) -> str:
+        """Extract computed statistics from observations as structured context for the LLM.
+
+        Instead of pre-filling template fields, we present clear numbers so
+        the LLM can map them to any template format without code changes.
+        """
+        import time as _time
+
+        stats_lines = []
+        observations_text = "\n".join(self.observations)
+
+        stats_lines.append(f"报告生成时间: {_time.strftime('%Y-%m-%d %H:%M')}")
+
+        # From get_teacher_transcription
+        teacher_dur_match = re.search(r"Teacher speaking duration:\s*(\d+\.?\d*)s\s*\((\d+\.?\d*)\s*min\)", observations_text)
+        if teacher_dur_match:
+            stats_lines.append(f"教师实际讲授时长: {teacher_dur_match.group(1)}秒 ({teacher_dur_match.group(2)}分钟)")
+
+        total_dur_match = re.search(r"Total class duration:\s*(\d+\.?\d*)s\s*\((\d+\.?\d*)\s*min\)", observations_text)
+        if total_dur_match:
+            stats_lines.append(f"课堂总时长: {total_dur_match.group(1)}秒 ({total_dur_match.group(2)}分钟)")
+
+        ratio_match = re.search(r"Teacher speaking ratio:\s*(\d+\.?\d*)%", observations_text)
+        if ratio_match:
+            stats_lines.append(f"教师讲授占比: {ratio_match.group(1)}%")
+
+        speed_match = re.search(r"Speaking speed:\s*(\d+)\s*chars/min", observations_text)
+        if speed_match:
+            stats_lines.append(f"教师平均语速: {speed_match.group(1)} 字/分（基于教师实际发言时间）")
+
+        question_match = re.search(r"Question count.*?:\s*(\d+)", observations_text)
+        if question_match:
+            stats_lines.append(f"教师提问次数: {question_match.group(1)} 次")
+
+        sentence_match = re.search(r"Total sentences:\s*(\d+)", observations_text)
+        if sentence_match:
+            stats_lines.append(f"教师发言总句数: {sentence_match.group(1)} 句")
+
+        # From get_class_statistics
+        student_match = re.search(r'"student_count"\s*:\s*(\d+)', observations_text)
+        if student_match:
+            stats_lines.append(f"学生出勤人数: {student_match.group(1)} 人")
+
+        raise_match = re.search(r'"raise_up_count"\s*:\s*(\d+)', observations_text)
+        if raise_match:
+            stats_lines.append(f"举手总次数: {raise_match.group(1)} 人次")
+
+        stand_match = re.search(r'"stand_count"\s*:\s*(\d+)', observations_text)
+        if stand_match:
+            stats_lines.append(f"起立总次数: {stand_match.group(1)} 人次")
+
+        if raise_match and student_match:
+            students = int(student_match.group(1))
+            raises = int(raise_match.group(1))
+            avg = round(raises / students, 1) if students > 0 else 0
+            stats_lines.append(f"人均举手次数: {avg} 次")
+
+        # From get_content_segmentation
+        seg_total_match = re.search(r"Total segments:\s*(\d+)", observations_text)
+        if seg_total_match:
+            stats_lines.append(f"内容分段总数: {seg_total_match.group(1)} 段")
+
+        low_period_match = re.search(r"Low activity periods?:\s*(.+?)(?:\n|$)", observations_text)
+        if low_period_match:
+            periods = low_period_match.group(1).strip()
+            if periods and periods != "None detected":
+                stats_lines.append(f"低活跃时段: {periods}")
+
+        # Density info
+        density_matches = re.findall(r"(\d+-\d+min):\s*(\d+)\s*segments", observations_text)
+        if density_matches:
+            density_str = "; ".join([f"{m[0]}: {m[1]}段" for m in density_matches])
+            stats_lines.append(f"各时段活跃度: {density_str}")
+
+        # From get_mindmap — extract topic hierarchy as text
+        mindmap_obs = [obs for obs in self.observations if "[get_mindmap]" in obs]
+        if mindmap_obs:
+            mmd_content = mindmap_obs[0]
+            mmd_text = mmd_content.split("\n", 1)[1] if "\n" in mmd_content else ""
+            try:
+                mmd_json = json.loads(mmd_text.strip())
+                topics = []
+
+                def _walk_nodes(node, depth=0):
+                    topic = node.get("topic", "")
+                    if topic and depth <= 2:
+                        prefix = "  " * depth + "- " if depth > 0 else ""
+                        topics.append(f"{prefix}{topic}")
+                    for child in node.get("children", []):
+                        _walk_nodes(child, depth + 1)
+
+                data = mmd_json.get("data", {})
+                _walk_nodes(data)
+                if topics:
+                    stats_lines.append(f"思维导图知识结构:\n" + "\n".join(topics))
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                pass
+
+        # From get_topic_segmentation — topic titles
+        topic_obs = [obs for obs in self.observations if "[get_topic_segmentation]" in obs]
+        if topic_obs:
+            topic_text = topic_obs[0]
+            try:
+                json_start = topic_text.find("[")
+                if json_start >= 0:
+                    topics_data = json.loads(topic_text[json_start:])
+                    topic_titles = [t.get("topic", "") for t in topics_data if t.get("topic")]
+                    if topic_titles:
+                        stats_lines.append(f"主题关键词: {'、'.join(topic_titles[:10])}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # teacher_name from project config
+        project_config = RuntimeConfig.get_section("Project")
+        teacher = project_config.get("teacher_name", "")
+        if teacher:
+            stats_lines.append(f"授课教师: {teacher}")
+
+        return "\n".join(stats_lines) if stats_lines else ""
 
     def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
         """Parse LLM output to extract one or more Action calls.
@@ -423,10 +546,7 @@ class ReportAgent(PipelineComponent):
                 yield {"type": "token", "content": no_data_msg}
                 return
 
-            # Signal: data collection done, starting generation (last step in plan)
-            yield {"type": "step_start", "index": -1}
-
-            # Phase 2: Generate response (streaming)
+            # Phase 2: Generate response
             if self.output_format_hint == "report":
                 is_report = True
                 logger.info("[ReportAgent] Intent: structured report (from orchestration hint)")
@@ -460,7 +580,9 @@ class ReportAgent(PipelineComponent):
             use_template = is_report and template_path is not None
 
             if use_template:
-                output_prompt = self._build_report_prompt(use_template=True)
+                structured_stats = self._extract_structured_stats()
+                logger.info(f"[ReportAgent] Extracted structured stats for LLM context")
+                output_prompt = self._build_report_prompt(use_template=True, structured_stats=structured_stats)
             elif is_report:
                 output_prompt = self._build_report_prompt(use_template=False)
             else:
@@ -473,15 +595,18 @@ class ReportAgent(PipelineComponent):
 
             try:
                 if use_template:
-                    # Template mode: LLM generates JSON, we fill the template
+                    # Template mode: generate step (-2) then fill_template step (-1)
+                    yield {"type": "step_start", "index": -2}
                     logger.info(f"[ReportAgent] Template mode: generating JSON to fill {template_path}")
                     json_response = self._call_llm_sync(output_prompt)
                     first_token_time = time.perf_counter()
 
                     field_values = parse_llm_json_response(json_response)
                     logger.info(f"[ReportAgent] Parsed {len(field_values)} fields from LLM response")
+                    yield {"type": "step_done", "index": -2}
 
-                    # Fill the template and save as .docx
+                    # Fill template step
+                    yield {"type": "step_start", "index": -1}
                     docx_path = os.path.join(session_dir, "class_report.docx")
                     fill_template(template_path, field_values, docx_path)
 
@@ -507,7 +632,8 @@ class ReportAgent(PipelineComponent):
                     yield {"type": "report_ready", "session_id": self.session_id}
 
                 else:
-                    # Streaming mode: LLM generates markdown directly
+                    # Streaming mode: LLM generates markdown directly (single generate step)
+                    yield {"type": "step_start", "index": -1}
                     streamer = self.model.generate(output_prompt, stream=True)
                     for token in streamer:
                         if first_token_time is None:

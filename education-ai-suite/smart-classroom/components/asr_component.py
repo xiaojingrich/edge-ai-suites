@@ -238,7 +238,7 @@ class ASRComponent(PipelineComponent):
                     if spk == teacher_speaker:
                         speaker_label = LABEL_TEACHER
                         teacher_lines.append(
-                            f"{text}"
+                            f"[{start} - {end}] {text}"
                         )
                     else:
                         if spk.startswith(f"{LABEL_SPEAKER}_"):

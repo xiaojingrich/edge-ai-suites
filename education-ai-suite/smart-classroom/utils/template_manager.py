@@ -94,21 +94,33 @@ def extract_template_structure(template_path: str) -> dict:
     }
 
 
-def build_template_fill_prompt(template_structure: dict, collected_observations: str, language: str = "zh") -> str:
+def build_template_fill_prompt(template_structure: dict, collected_observations: str, language: str = "zh",
+                               structured_stats: str = None) -> str:
     """Build a prompt that asks the LLM to fill template fields based on collected data.
+
+    Args:
+        structured_stats: Pre-computed statistics as readable text, shown prominently
+                         so the LLM can directly copy values instead of computing them.
 
     Returns the user prompt text (not tokenized).
     """
     fields = template_structure["all_fields"]
     raw_text = template_structure["raw_text"]
 
+    stats_section = ""
+    if structured_stats:
+        if language == "zh":
+            stats_section = f"\n## 已计算的精确数据（直接使用这些数值，不要自己计算）：\n{structured_stats}\n"
+        else:
+            stats_section = f"\n## Pre-computed exact data (use these values directly, do NOT compute yourself):\n{structured_stats}\n"
+
     if language == "zh":
         prompt = f"""你是一个课堂评估报告生成器。根据收集到的课堂数据，按照报告模板的结构填写所有字段。
-
+{stats_section}
 ## 报告模板结构：
 {raw_text}
 
-## 收集到的课堂数据：
+## 收集到的课堂原始数据：
 {collected_observations}
 
 ## 任务：
@@ -117,23 +129,23 @@ def build_template_fill_prompt(template_structure: dict, collected_observations:
 需要填写的字段：
 {json.dumps(fields, ensure_ascii=False)}
 
-## 规则：
-- 仅使用收集到的数据，不要编造统计数据
-- 如果某个字段的数据不可用，填写"暂无数据"
-- 数值型字段直接填数字或带单位的值
-- 描述型字段用简洁的句子，不超过2-3句话
-- recommendations 字段用换行符分隔多条建议
-- keywords 字段用顿号（、）分隔关键词
+## 重要规则：
+- 数值类字段（时长、人数、语速、举手次数等）直接使用"已计算的精确数据"中的值，不要自己推算
+- 定性分析字段（评估、建议、趋势等）根据原始数据进行分析
+- 如果某个字段的数据确实不可用，填写"暂无数据"
+- recommendations: 2-3条具体改进建议，用换行符分隔
+- keywords: 用顿号（、）分隔关键词
+- mindmap_summary: 描述知识结构的层次关系
 - 输出纯JSON，不要包含```json标记或其他文字
 
 输出JSON："""
     else:
         prompt = f"""You are a classroom evaluation report generator. Based on the collected classroom data, fill in all template fields.
-
+{stats_section}
 ## Report Template Structure:
 {raw_text}
 
-## Collected Classroom Data:
+## Collected Classroom Raw Data:
 {collected_observations}
 
 ## Task:
@@ -142,13 +154,13 @@ Based on the data above, generate content for each placeholder field in the temp
 Fields to fill:
 {json.dumps(fields, ensure_ascii=False)}
 
-## Rules:
-- Use ONLY the collected data, do NOT invent statistics
-- If data for a field is unavailable, fill with "Data not available"
-- Numeric fields: use numbers or values with units
-- Descriptive fields: use concise sentences, no more than 2-3 sentences
-- recommendations field: separate multiple items with newlines
-- keywords field: separate with commas
+## Important Rules:
+- Numeric fields (duration, attendance, speaking speed, hand raises, etc.): use values from "Pre-computed exact data" directly, do NOT compute yourself
+- Qualitative fields (assessments, recommendations, trends): analyze based on raw data
+- If data for a field is genuinely unavailable, fill with "Data not available"
+- recommendations: 2-3 specific suggestions, separated by newlines
+- keywords: separate with commas
+- mindmap_summary: describe the knowledge structure hierarchy
 - Output pure JSON only, no ```json markers or other text
 
 Output JSON:"""

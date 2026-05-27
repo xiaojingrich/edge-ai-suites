@@ -283,6 +283,8 @@ Action Input: <optional input or "none">"""
         return f"Observation: Transcription retrieved successfully.\n{content}"
 
     def _get_teacher_transcription(self, _input: str) -> str:
+        import re as _re
+
         path = os.path.join(self.session_dir, "teacher_transcription.txt")
 
         if not os.path.exists(path):
@@ -294,23 +296,62 @@ Action Input: <optional input or "none">"""
 
         lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
         total_sentences = len(lines)
-        total_chars = sum(len(l) for l in lines)
-        question_count = sum(1 for l in lines if l.endswith('？') or l.endswith('?'))
 
-        from utils.session_state_manager import SessionState
-        session_state = SessionState.get_session_state(self.session_id)
-        audio_duration_sec = session_state.get("audio_duration", 0)
-        audio_duration_min = audio_duration_sec / 60.0 if audio_duration_sec > 0 else 0
+        # Parse timestamps and extract text from each line
+        # Format: [start - end] text
+        teacher_speaking_sec = 0
+        total_chars = 0
+        question_count = 0
+        texts = []
 
-        speaking_speed = round(total_chars / audio_duration_min) if audio_duration_min > 0 else 0
+        for line in lines:
+            ts_match = _re.match(r'\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]\s*(.*)', line)
+            if ts_match:
+                start = float(ts_match.group(1))
+                end = float(ts_match.group(2))
+                text = ts_match.group(3)
+                teacher_speaking_sec += (end - start)
+            else:
+                # Fallback for lines without timestamps (old format)
+                text = line
+
+            total_chars += len(text)
+            texts.append(text)
+            if text.endswith('？') or text.endswith('?'):
+                question_count += 1
+
+        teacher_speaking_min = teacher_speaking_sec / 60.0 if teacher_speaking_sec > 0 else 0
+
+        # Get total class duration from content_segmentation_transcription
+        total_duration_sec = 0
+        cs_path = os.path.join(self.session_dir, "content_segmentation_transcription.txt")
+        if os.path.exists(cs_path):
+            cs_content = StorageManager.read_text_file(cs_path)
+            if cs_content:
+                cs_lines = cs_content.strip().split('\n')
+                for cs_line in reversed(cs_lines):
+                    match = _re.match(r'\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]', cs_line.strip())
+                    if match:
+                        total_duration_sec = float(match.group(2))
+                        break
+
+        total_duration_min = total_duration_sec / 60.0 if total_duration_sec > 0 else 0
+
+        # Speaking speed = teacher chars / teacher speaking time (not total time)
+        speaking_speed = round(total_chars / teacher_speaking_min) if teacher_speaking_min > 0 else 0
+
+        # Teacher speaking ratio
+        speaking_ratio = round(teacher_speaking_sec / total_duration_sec * 100, 1) if total_duration_sec > 0 else 0
 
         stats = (
             f"--- Teacher Speech Statistics ---\n"
             f"Total sentences: {total_sentences}\n"
             f"Total characters: {total_chars}\n"
             f"Question count (sentences ending with ?): {question_count}\n"
-            f"Audio duration: {audio_duration_sec}s ({audio_duration_min:.1f} min)\n"
-            f"Estimated speaking speed: {speaking_speed} chars/min\n"
+            f"Teacher speaking duration: {teacher_speaking_sec:.0f}s ({teacher_speaking_min:.1f} min)\n"
+            f"Total class duration: {total_duration_sec:.0f}s ({total_duration_min:.1f} min)\n"
+            f"Teacher speaking ratio: {speaking_ratio}%\n"
+            f"Speaking speed: {speaking_speed} chars/min (based on teacher speaking time)\n"
             f"---\n"
         )
 
