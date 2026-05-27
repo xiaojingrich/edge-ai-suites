@@ -146,17 +146,26 @@ class ContentSegmentationComponent(PipelineComponent):
     def generate_topics(self, transcript_text):
         try:
             logger.info("Generating topic segmentation...")
+            max_input_chars = len(transcript_text)
 
-            prompt = self.model.tokenizer.apply_chat_template(
-                self._build_messages(transcript_text),
-                tokenize=False,
-                add_generation_prompt=True
-            )
-
-            full_output = self.model.generate(prompt, False)
-            clean_output = self._clean_topics_output(full_output)
-            logger.info("Topic segmentation completed.")
-            return clean_output
+            for attempt in range(2):
+                try:
+                    input_text = transcript_text[:max_input_chars]
+                    prompt = self.model.tokenizer.apply_chat_template(
+                        self._build_messages(input_text),
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                    full_output = self.model.generate(prompt, False)
+                    clean_output = self._clean_topics_output(full_output)
+                    logger.info("Topic segmentation completed.")
+                    return clean_output
+                except Exception as e:
+                    if "probability tensor" in str(e).lower() and attempt == 0:
+                        max_input_chars = int(max_input_chars * 0.6)
+                        logger.warning(f"Probability tensor error, retrying with truncated input ({max_input_chars} chars)...")
+                        continue
+                    raise
 
         except Exception as e:
             logger.error(f"Topic segmentation failed: {e}")

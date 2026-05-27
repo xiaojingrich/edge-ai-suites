@@ -173,6 +173,7 @@ class Pipeline:
             return insufficient_mindmap_json
 
         try:
+            self.mindmap_component.model.acquire_model()
             full_mindmap = self.mindmap_component.generate_mindmap(summary_plain)
             logger.info("Mindmap generation successful.")
             return full_mindmap
@@ -184,7 +185,7 @@ class Pipeline:
                 detail=f"Error during mindmap generation: {e}"
             )
         finally:
-            pass
+            self.mindmap_component.model.release_model()
 
     def run_content_segmentation(self):
 
@@ -238,6 +239,8 @@ class Pipeline:
             import json
             from pathlib import Path
 
+            self.content_component.model.acquire_model()
+
             # 🔹 Generate topics (returns JSON string from LLM)
             topic_json_str = self.content_component.generate_topics(transcript_text)
 
@@ -266,6 +269,7 @@ class Pipeline:
                 detail=f"Error during topic segmentation: {e}"
             )
         finally:
+            self.content_component.model.release_model()
             # Clean up session state after processing
             SessionState.clear_session(self.session_id)
 

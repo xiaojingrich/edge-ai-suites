@@ -1,10 +1,9 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef } from 'react';
 import '../../assets/css/TopPanel.css';
 import BrandSlot from '../../assets/images/BrandSlot.svg';
 import menu from '../../assets/images/settings.svg';
 import LanguageSwitcher from '../LanguageSwitcher';
 import SettingsModal from '../Menu/SettingsButton';
-import AgentChatDialog from '../AgentChatDialog';
 import { useTranslation } from 'react-i18next';
 
 interface TopPanelProps {
@@ -18,7 +17,6 @@ interface TopPanelProps {
 
 const TopPanel: React.FC<TopPanelProps> = ({ projectName, setProjectName, isSettingsOpen, setIsSettingsOpen, activeScreen, setActiveScreen }) => {
   const menuIconRef = useRef<HTMLImageElement>(null);
-  const [agentOpen, setAgentOpen] = useState(false);
   const { t } = useTranslation();
 
   const openSettings = () => {
@@ -62,12 +60,6 @@ const TopPanel: React.FC<TopPanelProps> = ({ projectName, setProjectName, isSett
         >
           {t('contentSearch.title', 'Content Search')}
         </button>
-        <button
-          className="agent-nav-btn"
-          onClick={() => setAgentOpen(true)}
-        >
-          Agent
-        </button>
         <LanguageSwitcher />
         <img
           src={menu}
@@ -83,7 +75,6 @@ const TopPanel: React.FC<TopPanelProps> = ({ projectName, setProjectName, isSett
         projectName={projectName}
         setProjectName={setProjectName}
       />
-      <AgentChatDialog open={agentOpen} onClose={() => setAgentOpen(false)} />
     </header>
   );
 };

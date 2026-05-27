@@ -33,13 +33,7 @@ class MindmapComponent(PipelineComponent):
 
         try:
             logger.info("Generating mindmap from summary...")
-            mindmap_prompt = self.model.tokenizer.apply_chat_template(
-                self._get_mindmap_message(summary_text),
-                tokenize=False,
-                add_generation_prompt=True
-            )
-
-            full_mindmap = self.model.generate(mindmap_prompt, False)
+            full_mindmap = self._try_generate(summary_text)
             StorageManager.save(mindmap_path, full_mindmap, append=False)
             logger.info("Mindmap generation completed successfully.")
             return full_mindmap
@@ -47,3 +41,22 @@ class MindmapComponent(PipelineComponent):
         except Exception as e:
             logger.error(f"Mindmap generation failed: {e}")
             raise e
+
+    def _try_generate(self, text):
+        """Attempt generation with truncation retry on probability tensor errors."""
+        max_input_chars = len(text)
+        for attempt in range(2):
+            try:
+                input_text = text[:max_input_chars]
+                prompt = self.model.tokenizer.apply_chat_template(
+                    self._get_mindmap_message(input_text),
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+                return self.model.generate(prompt, False)
+            except Exception as e:
+                if "probability tensor" in str(e).lower() and attempt == 0:
+                    max_input_chars = int(max_input_chars * 0.6)
+                    logger.warning(f"Probability tensor error, retrying with truncated input ({max_input_chars} chars)...")
+                    continue
+                raise
