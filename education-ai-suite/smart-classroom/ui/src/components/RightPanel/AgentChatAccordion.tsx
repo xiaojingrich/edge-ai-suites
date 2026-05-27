@@ -6,10 +6,55 @@ import Accordion from '../common/Accordion';
 import { useTranslation } from 'react-i18next';
 import '../../assets/css/AgentChat.css';
 
+interface ThinkingStep {
+  thought: string;
+  action: string;
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  thinkingSteps?: ThinkingStep[];
 }
+
+const ThinkingBlock: React.FC<{ steps: ThinkingStep[]; isActive: boolean }> = ({ steps, isActive }) => {
+  const [collapsed, setCollapsed] = useState(false);
+  const { t } = useTranslation();
+
+  useEffect(() => {
+    if (!isActive && steps.length > 0) {
+      setCollapsed(true);
+    }
+  }, [isActive, steps.length]);
+
+  if (steps.length === 0) return null;
+
+  return (
+    <div className={`agent-thinking-block ${collapsed ? 'collapsed' : ''}`}>
+      <button
+        className="agent-thinking-toggle"
+        onClick={() => setCollapsed(!collapsed)}
+      >
+        {isActive && <span className="agent-thinking-indicator"></span>}
+        <span>{isActive
+          ? steps[steps.length - 1]?.thought || 'Thinking...'
+          : t('agent.thinkingDone', `${steps.length} steps completed`)
+        }</span>
+        <span className="agent-thinking-chevron">{collapsed ? '▶' : '▼'}</span>
+      </button>
+      {!collapsed && (
+        <ul className="agent-thinking-steps">
+          {steps.map((s, i) => (
+            <li key={i}>
+              <span className="agent-step-action">{s.action}</span>
+              {s.thought && <span className="agent-step-thought">{s.thought}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
 
 const AgentChatAccordion: React.FC = () => {
   const { t } = useTranslation();
@@ -19,12 +64,14 @@ const AgentChatAccordion: React.FC = () => {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+  const [isThinking, setIsThinking] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, thinkingSteps]);
 
   useEffect(() => {
     setMessages([]);
@@ -37,19 +84,34 @@ const AgentChatAccordion: React.FC = () => {
     setInput('');
     setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
     setIsStreaming(true);
-    setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+    setIsThinking(true);
+    setThinkingSteps([]);
 
     const controller = new AbortController();
     abortRef.current = controller;
+    const collectedSteps: ThinkingStep[] = [];
 
     try {
       for await (const event of streamAgentChat(sessionId, userMessage, conversationId, { signal: controller.signal })) {
-        if (event.type === 'agent_token' && event.token) {
+        if (event.type === 'agent_thinking') {
+          const step: ThinkingStep = { thought: event.thought || '', action: event.action || '' };
+          collectedSteps.push(step);
+          setThinkingSteps([...collectedSteps]);
+          if (event.conversationId && !conversationId) {
+            setConversationId(event.conversationId);
+          }
+        } else if (event.type === 'agent_token' && event.token) {
+          if (isThinking) {
+            setIsThinking(false);
+          }
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
-            if (last.role === 'assistant') {
+            if (last.role === 'assistant' && last.thinkingSteps) {
               updated[updated.length - 1] = { ...last, content: last.content + event.token };
+            } else {
+              updated.push({ role: 'assistant', content: event.token, thinkingSteps: [...collectedSteps] });
+              setThinkingSteps([]);
             }
             return updated;
           });
@@ -57,11 +119,12 @@ const AgentChatAccordion: React.FC = () => {
             setConversationId(event.conversationId);
           }
         } else if (event.type === 'error') {
-          setMessages(prev => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { role: 'assistant', content: `Error: ${event.message}` };
-            return updated;
-          });
+          setIsThinking(false);
+          setMessages(prev => [
+            ...prev,
+            { role: 'assistant', content: `Error: ${event.message}`, thinkingSteps: [...collectedSteps] },
+          ]);
+          setThinkingSteps([]);
         } else if (event.type === 'done') {
           if (event.conversationId && !conversationId) {
             setConversationId(event.conversationId);
@@ -70,17 +133,18 @@ const AgentChatAccordion: React.FC = () => {
       }
     } catch (err: any) {
       if (err.name !== 'AbortError') {
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { role: 'assistant', content: `Connection error: ${err.message}` };
-          return updated;
-        });
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: `Connection error: ${err.message}`, thinkingSteps: [...collectedSteps] },
+        ]);
       }
     } finally {
       setIsStreaming(false);
+      setIsThinking(false);
+      setThinkingSteps([]);
       abortRef.current = null;
     }
-  }, [sessionId, isStreaming, conversationId]);
+  }, [sessionId, isStreaming, conversationId, isThinking]);
 
   const handleSend = () => {
     sendMessage(input.trim());
@@ -113,7 +177,7 @@ const AgentChatAccordion: React.FC = () => {
     <Accordion title={t('agent.title', 'Class Report Agent')}>
       <div className="agent-chat-container">
         <div className="agent-chat-messages">
-          {messages.length === 0 && (
+          {messages.length === 0 && !isStreaming && (
             <div className="agent-chat-welcome">
               <p>{t('agent.welcome', 'Ask me anything about this class session.')}</p>
               <div className="agent-suggestions">
@@ -131,16 +195,24 @@ const AgentChatAccordion: React.FC = () => {
             </div>
           )}
           {messages.map((msg, i) => (
-            <div key={i} className={`agent-chat-msg agent-chat-msg-${msg.role}`}>
-              <div className="agent-chat-msg-content">
-                {msg.role === 'assistant' ? (
-                  <ReactMarkdown>{msg.content || '...'}</ReactMarkdown>
-                ) : (
-                  <p>{msg.content}</p>
-                )}
+            <React.Fragment key={i}>
+              {msg.role === 'assistant' && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (
+                <ThinkingBlock steps={msg.thinkingSteps} isActive={false} />
+              )}
+              <div className={`agent-chat-msg agent-chat-msg-${msg.role}`}>
+                <div className="agent-chat-msg-content">
+                  {msg.role === 'assistant' ? (
+                    <ReactMarkdown>{msg.content || '...'}</ReactMarkdown>
+                  ) : (
+                    <p>{msg.content}</p>
+                  )}
+                </div>
               </div>
-            </div>
+            </React.Fragment>
           ))}
+          {isThinking && thinkingSteps.length > 0 && (
+            <ThinkingBlock steps={thinkingSteps} isActive={true} />
+          )}
           <div ref={messagesEndRef} />
         </div>
 

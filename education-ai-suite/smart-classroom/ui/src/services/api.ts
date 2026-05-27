@@ -1188,9 +1188,11 @@ export async function csGetTags(): Promise<string[]> {
 // ==================== Agent Chat API ====================
 
 export interface AgentChatEvent {
-  type: 'agent_token' | 'error' | 'done';
+  type: 'agent_token' | 'agent_thinking' | 'error' | 'done';
   token?: string;
   message?: string;
+  thought?: string;
+  action?: string;
   conversationId?: string;
 }
 
@@ -1239,6 +1241,11 @@ export async function* streamAgentChat(
       if (chunk.error) {
         yield { type: 'error', message: chunk.error, conversationId: detectedConversationId };
         return;
+      }
+
+      if (chunk.type === 'thinking') {
+        yield { type: 'agent_thinking', thought: chunk.thought, action: chunk.action, conversationId: detectedConversationId };
+        continue;
       }
 
       const token: string | undefined = chunk.token;

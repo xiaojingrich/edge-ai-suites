@@ -345,6 +345,7 @@
     "noSession": "Start a session first",
     "send": "Send",
     "stop": "Stop",
-    "newConversation": "New conversation"
+    "newConversation": "New conversation",
+    "thinkingDone": "{{count}} steps completed"
   }
 }

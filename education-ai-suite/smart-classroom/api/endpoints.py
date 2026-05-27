@@ -890,13 +890,16 @@ async def generate_report(request: ReportRequest):
     pipeline = Pipeline(request.session_id)
 
     async def event_stream():
-        for token in pipeline.run_report(user_query=request.query):
-            if token.startswith("[ERROR]:"):
-                logger.error(f"Error generating report: {token}")
-                yield json.dumps({"token": "", "error": token}) + "\n"
-                break
-            else:
-                yield json.dumps({"token": token, "error": ""}) + "\n"
+        for event in pipeline.run_report(user_query=request.query):
+            if isinstance(event, dict):
+                if event["type"] == "thinking":
+                    yield json.dumps({"type": "thinking", "thought": event.get("thought", ""), "action": event.get("action", "")}) + "\n"
+                elif event["type"] == "token":
+                    content = event["content"]
+                    if content.startswith("[ERROR]:"):
+                        yield json.dumps({"token": "", "error": content}) + "\n"
+                        break
+                    yield json.dumps({"token": content, "error": ""}) + "\n"
             await asyncio.sleep(0)
 
     return StreamingResponse(event_stream(), media_type="application/json")
@@ -936,17 +939,21 @@ async def agent_chat(request: AgentChatRequest):
     async def event_stream():
         full_response = ""
 
-        for token in pipeline.run_report(
+        for event in pipeline.run_report(
             user_query=request.message,
             prior_observations=previous_observations,
             output_format=request.output_format,
         ):
-            if token.startswith("[ERROR]:"):
-                yield json.dumps({"token": "", "error": token, "conversation_id": conversation_id}) + "\n"
-                break
-            else:
-                full_response += token
-                yield json.dumps({"token": token, "error": "", "conversation_id": conversation_id}) + "\n"
+            if isinstance(event, dict):
+                if event["type"] == "thinking":
+                    yield json.dumps({"type": "thinking", "thought": event.get("thought", ""), "action": event.get("action", ""), "conversation_id": conversation_id}) + "\n"
+                elif event["type"] == "token":
+                    content = event["content"]
+                    if content.startswith("[ERROR]:"):
+                        yield json.dumps({"token": "", "error": content, "conversation_id": conversation_id}) + "\n"
+                        break
+                    full_response += content
+                    yield json.dumps({"token": content, "error": "", "conversation_id": conversation_id}) + "\n"
             await asyncio.sleep(0)
 
         conv_manager.add_message(conversation_id, "assistant", full_response)

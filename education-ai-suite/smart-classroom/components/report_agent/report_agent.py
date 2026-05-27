@@ -26,6 +26,7 @@ from components.report_agent.prompts import (
 from utils.config_loader import config
 from utils.runtime_config_loader import RuntimeConfig
 from utils.storage_manager import StorageManager
+from utils.locks import audio_pipeline_lock
 
 logger = logging.getLogger(__name__)
 
@@ -158,25 +159,94 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-    def _parse_action(self, llm_output: str) -> tuple[str, str]:
-        """Parse the LLM output to extract Action and Action Input."""
+    def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
+        """Parse LLM output to extract one or more Action calls.
+
+        Supports two formats:
+        1. Single action:
+           Action: tool_name
+           Action Input: input
+
+        2. Multi-action (batch):
+           Actions:
+           - tool_name_1
+           - tool_name_2
+           - tool_name_3
+        """
+        actions = []
+
+        # Try multi-action format first: "Actions:\n- tool1\n- tool2\n..."
+        multi_match = re.search(r"Actions:\s*\n((?:\s*-\s*.+\n?)+)", llm_output)
+        if multi_match:
+            lines = multi_match.group(1).strip().split("\n")
+            for line in lines:
+                tool = re.sub(r"^\s*-\s*", "", line).strip()
+                if tool:
+                    actions.append((tool, "none"))
+            if actions:
+                return actions
+
+        # Fall back to single action format
         action_match = re.search(r"Action:\s*(.+?)(?:\n|$)", llm_output)
         input_match = re.search(r"Action Input:\s*(.+?)(?:\n|$)", llm_output)
 
         if not action_match:
-            return None, None
+            return []
 
         action = action_match.group(1).strip()
         action_input = input_match.group(1).strip() if input_match else "none"
+        actions.append((action, action_input))
 
-        return action, action_input
+        return actions
 
-    def _run_react_loop(self) -> None:
-        """
-        Execute the ReAct reasoning loop.
-        The agent iteratively thinks, acts, and observes until it decides
-        to generate the final report or hits the step limit.
-        """
+    def _can_use_fast_path(self) -> bool:
+        """Determine if we can skip the ReAct loop entirely."""
+        if self.observations:
+            return False
+
+        if self._is_report_request():
+            return True
+
+        report_path = os.path.join(self._get_session_dir(), "class_report.md")
+        if os.path.exists(report_path):
+            return True
+
+        return False
+
+    def _run_fast_collection(self):
+        """Collect all available data without LLM decision-making. Yields thinking events."""
+        session_dir = self._get_session_dir()
+        report_path = os.path.join(session_dir, "class_report.md")
+
+        if not self._is_report_request() and os.path.exists(report_path):
+            yield {"type": "thinking", "action": "get_class_report", "thought": "Reading existing report for follow-up"}
+            obs = self.tools.execute_tool("get_class_report", "none")
+            self.observations.append(f"[get_class_report] {obs}")
+            self.trajectory.append("Fast path: read existing report for follow-up question")
+            logger.info("[ReportAgent] Fast path: using existing report for follow-up")
+            return
+
+        read_tools = [
+            ("get_class_statistics", "读取课堂统计数据" if self.language == "zh" else "Reading class statistics"),
+            ("get_class_summary", "读取课堂摘要" if self.language == "zh" else "Reading class summary"),
+            ("get_mindmap", "读取知识图谱" if self.language == "zh" else "Reading mind map"),
+            ("get_topic_segmentation", "读取主题分段" if self.language == "zh" else "Reading topic segmentation"),
+            ("get_transcription", "读取转录文本" if self.language == "zh" else "Reading transcription"),
+        ]
+
+        for tool_name, desc in read_tools:
+            yield {"type": "thinking", "action": tool_name, "thought": desc}
+            obs = self.tools.execute_tool(tool_name, "none")
+            if "NOT available" not in obs and "is empty" not in obs:
+                self.observations.append(f"[{tool_name}] {obs}")
+
+        self.trajectory.append(
+            f"Fast path: collected {len(self.observations)} data sources without ReAct loop"
+        )
+        logger.info(f"[ReportAgent] Fast path: collected {len(self.observations)} observations (0 LLM calls)")
+
+    def _run_react_loop(self):
+        """Execute the ReAct reasoning loop with multi-action support. Yields thinking events."""
         logger.info(f"[ReportAgent] Starting ReAct loop for session {self.session_id}")
 
         history = ""
@@ -184,37 +254,46 @@ class ReportAgent(PipelineComponent):
         for step in range(MAX_REACT_STEPS):
             logger.info(f"[ReportAgent] Step {step + 1}/{MAX_REACT_STEPS}")
 
-            # Ask LLM: What should I do next?
+            yield {"type": "thinking", "thought": f"Reasoning step {step + 1}...", "action": "llm_thinking"}
+
             prompt = self._build_react_prompt(history)
             llm_response = self._call_llm_sync(prompt)
 
-            logger.info(f"[ReportAgent] LLM response:\n{llm_response[:200]}...")
+            logger.info(f"[ReportAgent] LLM response:\n{llm_response[:300]}...")
 
-            # Record the trajectory
             self.trajectory.append(f"Step {step + 1}:\n{llm_response}")
 
-            # Parse the action
-            action, action_input = self._parse_action(llm_response)
+            # Extract the Thought line for display
+            thought_match = re.search(r"Thought:\s*(.+?)(?:\n|$)", llm_response)
+            thought_text = thought_match.group(1).strip() if thought_match else ""
 
-            if action is None:
+            actions = self._parse_actions(llm_response)
+
+            if not actions:
                 logger.warning("[ReportAgent] Could not parse action from LLM output. Forcing generate_final_report.")
                 break
 
-            logger.info(f"[ReportAgent] Action: {action}, Input: {action_input}")
+            should_generate = False
+            step_observations = []
 
-            # Execute the tool
-            observation = self.tools.execute_tool(action, action_input)
+            for action, action_input in actions:
+                logger.info(f"[ReportAgent] Action: {action}, Input: {action_input}")
+                yield {"type": "thinking", "thought": thought_text, "action": action}
 
-            # Check if agent decided to generate report
-            if observation == "__GENERATE_REPORT__":
-                logger.info("[ReportAgent] Agent decided to generate final report.")
+                observation = self.tools.execute_tool(action, action_input)
+
+                if observation == "__GENERATE_REPORT__":
+                    logger.info("[ReportAgent] Agent decided to generate final report.")
+                    should_generate = True
+                    break
+
+                self.observations.append(f"[{action}] {observation}")
+                step_observations.append(f"Action: {action}\n{observation}")
+
+            if should_generate:
                 break
 
-            # Store observation
-            self.observations.append(f"[{action}] {observation}")
-
-            # Build history for next iteration
-            history += f"{llm_response}\n{observation}\n\n"
+            history += f"{llm_response}\n" + "\n".join(step_observations) + "\n\n"
 
         logger.info(f"[ReportAgent] ReAct loop completed after {min(step + 1, MAX_REACT_STEPS)} steps. "
                     f"Collected {len(self.observations)} observations.")
@@ -237,6 +316,15 @@ class ReportAgent(PipelineComponent):
         if self.model is None:
             raise RuntimeError("ReportAgent requires a model instance.")
 
+        # Check if audio pipeline is using the model — avoid blocking it
+        if audio_pipeline_lock.locked():
+            busy_msg = ("当前音频处理正在进行中，请等待转录/摘要完成后再使用学情Agent。"
+                        if self.language == "zh"
+                        else "Audio processing is in progress. Please wait for transcription/summary to complete before using the Report Agent.")
+            logger.warning("[ReportAgent] audio_pipeline_lock is held, refusing to start.")
+            yield {"type": "token", "content": busy_msg}
+            return
+
         start = time.perf_counter()
 
         # Hold model in memory for the entire agent execution
@@ -244,8 +332,15 @@ class ReportAgent(PipelineComponent):
         logger.info("[ReportAgent] Model acquired — will hold until report generation completes.")
 
         try:
-            # Phase 1: ReAct loop — read existing data
-            self._run_react_loop()
+            # Phase 1: Data collection (yields thinking events)
+            if self._can_use_fast_path():
+                logger.info("[ReportAgent] Using fast path — skipping ReAct loop")
+                for event in self._run_fast_collection():
+                    yield event
+            else:
+                logger.info("[ReportAgent] Using ReAct loop — LLM-guided tool selection")
+                for event in self._run_react_loop():
+                    yield event
 
             react_time = time.perf_counter() - start
             logger.info(f"[ReportAgent] Data collection phase completed in {react_time:.2f}s")
@@ -254,11 +349,14 @@ class ReportAgent(PipelineComponent):
             if not self.observations:
                 no_data_msg = "当前无课堂记录数据，请先完成一节课的录制。" if self.language == "zh" else "No classroom recording data available. Please complete a class session first."
                 logger.warning(f"[ReportAgent] No data found for session {self.session_id}")
-                yield no_data_msg
+                yield {"type": "token", "content": no_data_msg}
                 return
 
+            # Signal: data collection done, starting generation
+            generating_msg = "正在生成回复..." if self.language == "zh" else "Generating response..."
+            yield {"type": "thinking", "thought": generating_msg, "action": "generate"}
+
             # Phase 2: Generate response (streaming)
-            # Choose output style: use orchestration hint if available, else keyword fallback
             if self.output_format_hint == "report":
                 is_report = True
                 logger.info("[ReportAgent] Intent: structured report (from orchestration hint)")
@@ -304,7 +402,7 @@ class ReportAgent(PipelineComponent):
                         first_token_time = time.perf_counter()
 
                     StorageManager.save_async(report_path, token, append=True)
-                    yield token
+                    yield {"type": "token", "content": token}
 
             finally:
                 end = time.perf_counter()

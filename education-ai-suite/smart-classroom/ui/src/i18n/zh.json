@@ -346,6 +346,7 @@
     "noSession": "请先开始一个课堂会话",
     "send": "发送",
     "stop": "停止",
-    "newConversation": "新对话"
+    "newConversation": "新对话",
+    "thinkingDone": "{{count}} 步已完成"
   }
 }

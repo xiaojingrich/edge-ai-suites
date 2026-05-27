@@ -38,9 +38,17 @@ You operate in a reasoning loop: Thought → Action → Observation → Thought 
 
 ## Response Format (STRICT):
 
+For a single action:
 Thought: <your reasoning about what to do next>
 Action: <tool_name>
 Action Input: <input or "none">
+
+For multiple actions in one step (PREFERRED when you need several data sources):
+Thought: <your reasoning — list all tools you need>
+Actions:
+- tool_name_1
+- tool_name_2
+- tool_name_3
 
 After you receive Observation results, continue with another Thought/Action cycle.
 
@@ -48,6 +56,8 @@ When ready to generate the final output, use:
 Thought: I have collected sufficient data. Ready to generate.
 Action: generate_final_report
 Action Input: none
+
+IMPORTANT: After get_session_metadata, you know exactly what files exist. Use the batch Actions format to collect all needed data in ONE step.
 
 Begin now."""
 
@@ -84,9 +94,17 @@ REACT_SYSTEM_PROMPT_ZH = """你是一个课堂评估Agent。你的目标是根�
 
 ## 响应格式（严格遵守）：
 
+单个操作：
 Thought: <你对下一步的推理>
 Action: <tool_name>
 Action Input: <输入或"none">
+
+多个操作同时执行（当你需要多个数据源时优先使用此格式）：
+Thought: <你的推理 — 列出所有需要的工具>
+Actions:
+- tool_name_1
+- tool_name_2
+- tool_name_3
 
 收到观察结果后，继续下一个 思考/行动 循环。
 
@@ -94,6 +112,8 @@ Action Input: <输入或"none">
 Thought: 数据收集完毕，准备生成。
 Action: generate_final_report
 Action Input: none
+
+重要：get_session_metadata 返回后，你已知道存在哪些文件。用批量 Actions 格式在一步内收集所有需要的数据。
 
 现在开始。"""
 
