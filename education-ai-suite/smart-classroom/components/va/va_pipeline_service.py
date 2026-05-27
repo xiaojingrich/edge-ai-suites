@@ -299,6 +299,7 @@ class VideoAnalyticsPipelineService:
                     self.logger.info(
                         f"Pipeline '{pipeline_name}' exited normally (EOS received)"
                     )
+                    self._on_pipeline_completed(pipeline_name)
                     break
                 else:
                     # Unexpected exit — record error for status reporting
@@ -351,6 +352,31 @@ class VideoAnalyticsPipelineService:
             time.sleep(2)
 
         self.logger.info(f"Monitor thread for pipeline '{pipeline_name}' stopped")
+
+    def _on_pipeline_completed(self, pipeline_name: str):
+        """Save final statistics when a pipeline completes normally (EOS)."""
+        if pipeline_name != "front":
+            return
+
+        params = self.pipeline_params.get(pipeline_name)
+        if not params:
+            return
+
+        output_dir = Path(params["options"].output_dir)
+        front_posture_file = output_dir / "front_posture.txt"
+
+        if not front_posture_file.exists():
+            self.logger.warning(f"front_posture.txt not found at {front_posture_file}, skipping statistics save")
+            return
+
+        try:
+            stats, _ = self.get_pose_stats(str(front_posture_file), None)
+            stats_path = output_dir / "class_statistics.json"
+            with open(stats_path, "w", encoding="utf-8") as f:
+                json.dump(stats, f, indent=2, ensure_ascii=False)
+            self.logger.info(f"Saved class_statistics.json to {stats_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save class_statistics.json: {e}")
 
     def _launch_pipeline_internal(
         self, pipeline_name: str, options: PipelineOptions, command: List[str]

@@ -73,6 +73,8 @@ class Summarizer(BaseSummarizer):
         try:
             del model
             gc.collect()
+            import time
+            time.sleep(1)
             logger.info("Model instance destroyed and memory reclaimed")
         except Exception as e:
             logger.warning(f"Failed to fully destroy model: {e}")
