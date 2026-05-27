@@ -6,6 +6,7 @@ setup_logger()
 
 from fastapi import FastAPI
 from api.endpoints import register_routes
+from api.llm_serving import register_llm_routes
 from utils.runtime_config_loader import RuntimeConfig
 from utils.ensure_model import ensure_model
 from utils.preload_models import preload_models
@@ -32,6 +33,7 @@ app.add_middleware(
 )
 
 register_routes(app)
+register_llm_routes(app)
 
 def system_check():
     if (not system_checker.check_system_requirements()) and (not system_checker.show_warning_and_prompt_user_to_continue()):

@@ -476,3 +476,7 @@ content_search:
     max_history_turns: 3    # number of prior conversation turns (user+assistant pairs) sent to the VLM
     context_window: 16384   # token budget for dynamic context selection; 
     retrieval_score_threshold: 85  # minimum relevance score (0-100) a chunk must have to be used as context
+
+router:
+  enabled: true
+  mode: keyword  # keyword | llm

@@ -13,18 +13,38 @@ class Summarizer(BaseSummarizer):
         self.model_name = model_name
         self.device = device
         self.temperature = temperature
+        self._held_model = None
         logger.info(f"Loading Model: model name={self.model_name}, model path={ensure_model.get_model_path()}, device={self.device}")
         self.tokenizer = AutoTokenizer.from_pretrained(ensure_model.get_model_path())
 
+    def acquire_model(self):
+        if self._held_model is None:
+            self._held_model = self._load_model()
+            logger.info("Model acquired and held in memory for batch operations.")
+        return self._held_model
+
+    def release_model(self):
+        if self._held_model is not None:
+            self._destroy_model(self._held_model)
+            self._held_model = None
+            logger.info("Held model released.")
+
     def generate(self, prompt, stream: bool = True):
+        use_held = self._held_model is not None
+
         if stream:
             streamer = YieldingTextStreamer(self.tokenizer)
 
             def run_generation():
                 model = None
+                should_destroy = False
                 try:
                     with audio_pipeline_lock:
-                        model = self._load_model()
+                        if use_held:
+                            model = self._held_model
+                        else:
+                            model = self._load_model()
+                            should_destroy = True
                         model.generate(
                             prompt,
                             streamer=streamer,
@@ -32,11 +52,7 @@ class Summarizer(BaseSummarizer):
                             temperature=self.temperature,
                             do_sample=False,
                         )
-                    cfg = model.get_generation_config()
-                    for attr in dir(cfg):
-                        if not attr.startswith("_"):
-                            logger.info(f"  {attr}: {getattr(cfg, attr)}")
-                    
+
                 except Exception as e:
                     error_msg = "Summary generation failed. Please ensure sufficient free resources are available to run this process."
                     logger.error(f"Exception occured in summary generation")
@@ -44,7 +60,7 @@ class Summarizer(BaseSummarizer):
                         error_msg = "Summary generation failed. Insufficient GPU resources available to run this process."
                     streamer._queue.put(f"[ERROR]: {error_msg}")
                 finally:
-                    if model is not None:
+                    if should_destroy and model is not None:
                         self._destroy_model(model)
                     streamer.end()
 
@@ -52,9 +68,14 @@ class Summarizer(BaseSummarizer):
             return streamer
         else:
             model = None
+            should_destroy = False
             try:
                 with audio_pipeline_lock:
-                    model = self._load_model()
+                    if use_held:
+                        model = self._held_model
+                    else:
+                        model = self._load_model()
+                        should_destroy = True
                     return model.generate(
                         prompt,
                         max_new_tokens=config.models.summarizer.max_new_tokens,
@@ -62,9 +83,9 @@ class Summarizer(BaseSummarizer):
                         do_sample=False,
                     )
             finally:
-                if model is not None:
+                if should_destroy and model is not None:
                     self._destroy_model(model)
-            
+
     def _load_model(self):
         logger.info("Loading model instance...")
         return ov_genai.LLMPipeline(ensure_model.get_model_path(), device=self.device)

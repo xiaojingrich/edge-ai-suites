@@ -83,6 +83,12 @@ class Summarizer(BaseSummarizer):
             trust_remote_code=True
         )
 
+    def acquire_model(self):
+        pass
+
+    def release_model(self):
+        pass
+
     def generate(self, prompt: str, stream: bool = True):
         max_new_tokens = config.models.summarizer.max_new_tokens or 1024
 

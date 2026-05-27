@@ -1185,6 +1185,71 @@ export async function csGetTags(): Promise<string[]> {
   });
 }
 
+// ==================== Agent Chat API ====================
+
+export interface AgentChatEvent {
+  type: 'agent_token' | 'error' | 'done';
+  token?: string;
+  message?: string;
+  conversationId?: string;
+}
+
+export async function* streamAgentChat(
+  sessionId: string,
+  message: string,
+  conversationId?: string | null,
+  opts: StreamOptions = {}
+): AsyncGenerator<AgentChatEvent> {
+  const body: Record<string, any> = { message };
+  if (sessionId) body.session_id = sessionId;
+  if (conversationId) body.conversation_id = conversationId;
+
+  const res = await fetch(`${BASE_URL}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body),
+    signal: opts.signal,
+    cache: 'no-store',
+    keepalive: true,
+  });
+
+  if (!res.ok) throw new Error(`Agent chat failed: ${res.status} ${res.statusText}`);
+
+  const reader = res.body?.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let detectedConversationId: string | undefined;
+
+  while (reader) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let chunk: any;
+      try { chunk = JSON.parse(trimmed); } catch { continue; }
+
+      if (chunk.conversation_id && !detectedConversationId) {
+        detectedConversationId = chunk.conversation_id;
+      }
+
+      if (chunk.error) {
+        yield { type: 'error', message: chunk.error, conversationId: detectedConversationId };
+        return;
+      }
+
+      const token: string | undefined = chunk.token;
+      if (typeof token === 'string' && token.length > 0) {
+        yield { type: 'agent_token', token, conversationId: detectedConversationId };
+      }
+    }
+  }
+  yield { type: 'done', conversationId: detectedConversationId };
+}
+
 /** Map a MIME type string to a short, display-friendly extension label (e.g. "DOCX"). */
 export function mimeToShortType(mimeType: string): string {
   const MIME_MAP: Record<string, string> = {

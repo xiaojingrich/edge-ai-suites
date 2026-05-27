@@ -33,7 +33,7 @@
     "audioProcessingComplete": "音频处理完成",
     "audioProcessingError": "音频处理错误",
     "videoStreamingStopped": "视频流已停止",
-    "noVideoConfigured": "未配置视频", 
+    "noVideoConfigured": "未配置视频",
     "videoReady": "视频准备就绪",
     "videoAnalyticsFailed": "视频分析失败",
     "audio": "音频",
@@ -93,9 +93,8 @@
   "tabs": {
     "transcripts": "转录",
     "summary": "AI 摘要",
-    "mindmap":"思维导图"
+    "mindmap": "思维导图"
   },
-
   "accordion": {
     "noData": "暂无数据",
     "noSessionActive": "无活动会话。请上传文件或开始录音以开始监控。",
@@ -127,10 +126,10 @@
     "performanceMetrics": "性能指标",
     "ttft": "首个 Token 延迟 (TTFT)",
     "tpot": "每个 Token 延迟 (TPOT)",
-    "tps":"每秒 Token 数",
+    "tps": "每秒 Token 数",
     "totalTokensProcessed": "处理的总 Token 数",
     "timeToGenerateSummary": "生成摘要耗时",
-    "totalTimeTaken":"总耗时",
+    "totalTimeTaken": "总耗时",
     "loadingConfiguration": "正在加载配置...",
     "cpuUtilization": "CPU 利用率",
     "gpuUtilization": "GPU 利用率",
@@ -167,7 +166,7 @@
     "failedToCopyPath": "复制路径失败",
     "anErrorOccurred": "发生了错误"
   },
-    "videoStream": {
+  "videoStream": {
     "configureCameras": "在设置中配置摄像头以启用视频分析",
     "uploadFilesToStart": "或上传音频/视频文件以开始",
     "uploadFileButton": "上传文件",
@@ -176,8 +175,8 @@
     "audioRecordingContinues": "音频录制正常继续",
     "streamingIconAlt": "视频流图标",
     "noStream": "无视频流",
-    "videoFailed":"视频获取失败",
-    "continuingAudioOnly":"继续进行纯音频处理",
+    "videoFailed": "视频获取失败",
+    "continuingAudioOnly": "继续进行纯音频处理",
     "loadingvideo": "正在加载视频流"
   },
   "classStatistics": {
@@ -222,7 +221,7 @@
     "backendUnreachable": "无法连接到内容搜索后端服务，请确认服务是否正在运行。",
     "servicesUnhealthy": "以下后端服务不可用：{{services}}。部分功能可能受限。"
   },
-  "uploadSection":{
+  "uploadSection": {
     "upload": "上传",
     "dragDrop": "将文件拖放到此处",
     "orClick": "或点击选择文件",
@@ -335,5 +334,18 @@
     "summarization": "总结",
     "showMore": "显示更多",
     "showLess": "收起"
+  },
+  "agent": {
+    "title": "学情Agent",
+    "welcome": "有什么关于这节课的问题可以问我。",
+    "suggest1": "今天学生表现怎么样？",
+    "suggest2": "哪个时间段参与度最低？",
+    "suggest3": "帮我生成一份完整的课堂评估报告",
+    "suggest4": "根据今天课程内容出5道测验题",
+    "inputPlaceholder": "输入关于课堂的问题...",
+    "noSession": "请先开始一个课堂会话",
+    "send": "发送",
+    "stop": "停止",
+    "newConversation": "新对话"
   }
 }

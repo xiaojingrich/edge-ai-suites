@@ -24,6 +24,7 @@ from utils.locks import audio_pipeline_lock, video_analytics_lock
 from components.va.va_pipeline_service import VideoAnalyticsPipelineService, PipelineOptions
 from utils.session_manager import generate_session_id
 from dto.search_dto import SearchRequest
+from dto.report_dto import ReportRequest, AgentChatRequest
 from utils.session_state_manager import SessionState
 from dto.ocr_dto import OCRExtractRequest, OCRResponse
 from components.ocr.ocr_pipeline import ocr_detect_file, ocr_extract_text
@@ -449,7 +450,23 @@ def stop_video_analytics_pipeline(
                         "pipeline_name": request.pipeline_name,
                         "session_id": x_session_id,
                         "error": str(e)
-                    })                                   
+                    })
+
+            # Save final statistics to file when front pipeline stops
+            project_config = RuntimeConfig.get_section("Project")
+            location = project_config.get("location", "outputs")
+            name = project_config.get("name", "default")
+            output_dir = os.path.join(location, name, x_session_id, "va")
+            front_posture_file = os.path.join(output_dir, "front_posture.txt")
+
+            if os.path.exists(front_posture_file):
+                try:
+                    final_stats, _ = service.get_pose_stats(front_posture_file, None)
+                    stats_path = os.path.join(output_dir, "class_statistics.json")
+                    StorageManager.save(stats_path, json.dumps(final_stats, indent=2), append=False)
+                    logger.info(f"Final class statistics saved to {stats_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save final statistics: {e}")
 
             return JSONResponse(content={"results": results}, status_code=200)
 
@@ -863,6 +880,136 @@ def ocr_detect_file_endpoint(file: UploadFile = File(...)):
 @router.post("/ocr/extract-text", response_model=OCRResponse)
 async def ocr_extract_text_endpoint(file: UploadFile = File(...), x_session_id: Optional[str] = Header(None)):
     return ocr_extract_text(file, x_session_id)
+
+
+@router.post("/generate-report")
+async def generate_report(request: ReportRequest):
+    """
+    Generate a full class evaluation report using the ReAct Agent.
+    """
+    pipeline = Pipeline(request.session_id)
+
+    async def event_stream():
+        for token in pipeline.run_report(user_query=request.query):
+            if token.startswith("[ERROR]:"):
+                logger.error(f"Error generating report: {token}")
+                yield json.dumps({"token": "", "error": token}) + "\n"
+                break
+            else:
+                yield json.dumps({"token": token, "error": ""}) + "\n"
+            await asyncio.sleep(0)
+
+    return StreamingResponse(event_stream(), media_type="application/json")
+
+
+@router.post("/agent/chat")
+async def agent_chat(request: AgentChatRequest):
+    """
+    Multi-turn chat with the Report Agent.
+    session_id is optional — if not provided, the latest session is used.
+    """
+    from components.report_agent.conversation import ConversationManager
+    from utils.session_manager import get_latest_session_id
+
+    session_id = request.session_id
+    if not session_id:
+        session_id = get_latest_session_id()
+        if not session_id:
+            raise HTTPException(status_code=404, detail="No session found. Please complete a class recording first.")
+        logger.info(f"[agent/chat] No session_id provided, using latest: {session_id}")
+
+    conv_manager = ConversationManager(session_id)
+
+    if request.conversation_id:
+        conversation_id = request.conversation_id
+        conv = conv_manager.get_conversation(conversation_id)
+        if conv is None:
+            raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found.")
+    else:
+        conversation_id = conv_manager.create_conversation()
+
+    conv_manager.add_message(conversation_id, "user", request.message)
+    previous_observations = conv_manager.get_observations(conversation_id)
+
+    pipeline = Pipeline(session_id)
+
+    async def event_stream():
+        full_response = ""
+
+        for token in pipeline.run_report(
+            user_query=request.message,
+            prior_observations=previous_observations,
+            output_format=request.output_format,
+        ):
+            if token.startswith("[ERROR]:"):
+                yield json.dumps({"token": "", "error": token, "conversation_id": conversation_id}) + "\n"
+                break
+            else:
+                full_response += token
+                yield json.dumps({"token": token, "error": "", "conversation_id": conversation_id}) + "\n"
+            await asyncio.sleep(0)
+
+        conv_manager.add_message(conversation_id, "assistant", full_response)
+
+    return StreamingResponse(event_stream(), media_type="application/json")
+
+
+@router.get("/report/{session_id}")
+def get_report(session_id: str):
+    """Retrieve a previously generated class report for a session."""
+    project_config = RuntimeConfig.get_section("Project")
+    report_path = os.path.join(
+        project_config.get("location"),
+        project_config.get("name"),
+        session_id,
+        "class_report.md",
+    )
+
+    if not os.path.exists(report_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Report not found for session {session_id}. Generate it first via POST /generate-report.",
+        )
+
+    report_content = StorageManager.read_text_file(report_path)
+    return JSONResponse(
+        content={"session_id": session_id, "report": report_content},
+        status_code=200,
+    )
+
+
+@router.post("/chat")
+async def unified_chat(request: AgentChatRequest):
+    """
+    Unified chat endpoint with intent routing.
+    Primary entry point for the frontend UI when OpenClaw is not deployed.
+    """
+    from components.intent_router import IntentRouter
+    from utils.config_loader import config as app_config
+
+    router_config = getattr(app_config, 'router', None)
+    router_enabled = getattr(router_config, 'enabled', False) if router_config else False
+
+    if router_enabled and not request.output_format:
+        router_mode = getattr(router_config, 'mode', 'keyword')
+
+        model = None
+        if router_mode == "llm":
+            from components.summarizer_component import SummarizerComponent
+            model = SummarizerComponent._model
+
+        intent_router = IntentRouter(mode=router_mode, model=model)
+        routing = intent_router.route(request.message)
+
+        if routing.agent in ("homework", "lesson_prep"):
+            return JSONResponse(
+                content={"error": f"Agent '{routing.agent}' is not yet implemented."},
+                status_code=501,
+            )
+
+        request.output_format = routing.output_format
+
+    return await agent_chat(request)
 
 
 def register_routes(app: FastAPI):
