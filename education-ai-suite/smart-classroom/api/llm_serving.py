@@ -24,7 +24,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from components.summarizer_component import SummarizerComponent
-from utils.locks import audio_pipeline_lock
 
 logger = logging.getLogger(__name__)
 
@@ -83,19 +82,11 @@ async def chat_completions(request: ChatCompletionRequest):
             media_type="text/event-stream",
         )
 
-    # Non-streaming: acquire lock to prevent conflict with ReportAgent
-    if audio_pipeline_lock.locked():
-        raise HTTPException(status_code=429, detail="Model is busy. Try again later.")
-
-    model.acquire_model()
-    try:
-        result = model.generate(prompt, stream=False)
-        if not isinstance(result, str):
-            result = model.tokenizer.decode(result[0], skip_special_tokens=True)
-            if result.startswith(prompt):
-                result = result[len(prompt):]
-    finally:
-        model.release_model()
+    result = model.generate(prompt, stream=False)
+    if not isinstance(result, str):
+        result = model.tokenizer.decode(result[0], skip_special_tokens=True)
+        if result.startswith(prompt):
+            result = result[len(prompt):]
 
     return ChatCompletionResponse(
         id=request_id,
@@ -115,31 +106,9 @@ async def chat_completions(request: ChatCompletionRequest):
 
 
 async def _stream_response(model, prompt: str, request_id: str, created: int, model_name: str):
-    if audio_pipeline_lock.locked():
-        yield f"data: {json.dumps({'error': 'Model is busy'})}\n\n"
-        return
-
-    model.acquire_model()
-    try:
-        streamer = model.generate(prompt, stream=True)
-        for token in streamer:
-            chunk = {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model_name,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": token},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-
-        # Final chunk
-        final = {
+    streamer = model.generate(prompt, stream=True)
+    for token in streamer:
+        chunk = {
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": created,
@@ -147,15 +116,28 @@ async def _stream_response(model, prompt: str, request_id: str, created: int, mo
             "choices": [
                 {
                     "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop",
+                    "delta": {"content": token},
+                    "finish_reason": None,
                 }
             ],
         }
-        yield f"data: {json.dumps(final)}\n\n"
-        yield "data: [DONE]\n\n"
-    finally:
-        model.release_model()
+        yield f"data: {json.dumps(chunk)}\n\n"
+
+    final = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def register_llm_routes(app):
