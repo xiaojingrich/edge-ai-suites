@@ -197,17 +197,21 @@ Report Agent 有两条执行路径：**Fast Path**（快速路径）和 **ReAct 
 ### 模板模式执行流程
 
 ```
-[工具收集数据] → [提取模板结构] → [LLM 生成 JSON] → [填充模板] → [保存 .docx]
-                        │                 │                 │
-            extract_template_structure   build_template_fill_prompt   fill_template
-            返回 sections + all_fields   要求 LLM 按字段输出 JSON    替换占位符
+[工具收集数据] → [提取模板结构] → [LLM 分析数据填充字段] → [填充模板] → [保存 .docx]
+                        │                    │                      │
+            extract_template_structure    LLM 看到数据+模板         fill_template
+            返回 sections + all_fields    输出 "field: value" 格式   替换占位符
 ```
 
+设计原则：**工具只负责收集数据，模型自行决定如何填充模板**。
+
 1. `extract_template_structure()` — 解析 .docx，提取 sections + placeholder 字段列表
-2. `build_template_fill_prompt()` — 构建提示词，要求 LLM 对每个字段生成对应内容（JSON 格式）
-3. LLM 生成 JSON — `{"field1": "值", "field2": "值", ...}`
-4. `parse_llm_json_response()` — 容错 JSON 解析（处理 ```json 标记等）
+2. 构建 prompt — 将收集到的课堂数据 + 模板结构（字段列表和原文）一起提供给 LLM
+3. LLM 分析数据并输出 — 格式为 `field_name: 填充内容`（每行一个字段，比 JSON 更容错）
+4. `_parse_template_fill_response()` — 解析 key-value 格式响应
 5. `fill_template()` — 将字段值替换到 .docx 模板中，保留原有格式
+
+**灵活性**：模板字段变化时不需要修改代码，模型会根据提供的数据自行判断如何填充。
 
 ### 无模板模式
 
@@ -563,26 +567,40 @@ smart-classroom/
 
 ---
 
-## Intent Router（无 OpenClaw 时）
+## Intent Router（意图分析层）
+
+意图分析层是所有用户请求的第一道关卡。它决定：
+1. 是否需要调用 Agent（学情/作业/备课）
+2. 还是直接在该层用模型回答（通用问答/闲聊）
+
+**设计原则**：Agent 只处理领域任务，不处理通用对话。无关问题在意图层直接响应，不下发到 Agent。
 
 ```
 POST /chat {message: "..."}
       │
       ▼
-┌─────────────────────────────────┐
-│  router.enabled == true?         │
-│  ├── Yes → IntentRouter.route()  │
-│  │   ├── mode=keyword → 正则匹配 (0ms)
-│  │   └── mode=llm → 7B 分类 (~2s)
-│  │   Result: {agent, output_format, confidence}
-│  │   │
-│  │   ├── agent="report" → /agent/chat
-│  │   ├── agent="homework" → 501 (future)
-│  │   └── agent="lesson_prep" → 501 (future)
-│  │
-│  └── No → 直接调用 /agent/chat
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  IntentRouter.route(message)                         │
+│  ├── mode=keyword → 正则匹配 (0ms)                  │
+│  └── mode=llm → 7B 分类 (~2s)                       │
+│                                                      │
+│  Result: {agent, output_format, confidence}          │
+│  │                                                   │
+│  ├── agent="report"      → Report Agent (学情)       │
+│  ├── agent="homework"    → Homework Agent (作业)     │
+│  ├── agent="lesson_prep" → Lesson Prep Agent (备课)  │
+│  └── agent="general"     → 意图层直接调用模型回答     │
+│                            （不进入任何 Agent）        │
+└─────────────────────────────────────────────────────┘
 ```
+
+### general 路由（意图层直接回答）
+
+当判定为 `general`（闲聊、问候、与课堂无关的问题），意图层直接用 LLM 生成回复：
+- 不收集课堂数据
+- 不触发 Agent 的 ReAct/Fast Path 流程
+- Prompt 简单：system="你是一个课堂助手" + user message
+- 流式返回，和 Agent 共用同一个前端 token 渲染
 
 ---
 

@@ -29,10 +29,7 @@ from utils.storage_manager import StorageManager
 from utils.locks import audio_pipeline_lock
 from utils.template_manager import (
     get_template_path,
-    extract_template_structure,
-    build_template_fill_prompt,
     fill_template,
-    parse_llm_json_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,28 +99,9 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-    def _build_report_prompt(self, use_template: bool = False, structured_stats: str = None) -> str:
+    def _build_report_prompt(self) -> str:
         """Build the final report generation prompt with all collected observations."""
         observations_text = "\n\n---\n\n".join(self.observations)
-
-        if use_template:
-            template_path = get_template_path(self.language, self.session_id)
-            if template_path:
-                template_structure = extract_template_structure(template_path)
-                user_content = build_template_fill_prompt(
-                    template_structure, observations_text, self.language,
-                    structured_stats=structured_stats,
-                )
-                system_msg = ("你是一个专业的教育分析师。根据提供的数据填充报告模板字段，输出JSON。"
-                              if self.language == "zh"
-                              else "You are a professional educational analyst. Fill report template fields based on provided data. Output JSON.")
-                messages = [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_content},
-                ]
-                return self.model.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True,
-                )
 
         if self.language == "zh":
             user_content = REPORT_GENERATION_PROMPT_ZH.format(collected_observations=observations_text)
@@ -185,125 +163,97 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-    def _extract_structured_stats(self) -> str:
-        """Extract computed statistics from observations as structured context for the LLM.
+    def _build_template_fill_prompt(self, template_path: str) -> str:
+        """Build a concise prompt for LLM to fill template fields.
 
-        Instead of pre-filling template fields, we present clear numbers so
-        the LLM can map them to any template format without code changes.
+        Provides collected data and template structure to the model.
+        The model decides how to map data to fields — no rigid format required.
+        Output: one line per field as "field_name: content".
         """
-        import time as _time
+        from utils.template_manager import extract_template_structure
 
-        stats_lines = []
-        observations_text = "\n".join(self.observations)
+        template_structure = extract_template_structure(template_path)
+        fields = template_structure["all_fields"]
+        raw_text = template_structure["raw_text"]
+        observations_text = "\n\n".join(self.observations)
 
-        stats_lines.append(f"报告生成时间: {_time.strftime('%Y-%m-%d %H:%M')}")
-
-        # From get_teacher_transcription
-        teacher_dur_match = re.search(r"Teacher speaking duration:\s*(\d+\.?\d*)s\s*\((\d+\.?\d*)\s*min\)", observations_text)
-        if teacher_dur_match:
-            stats_lines.append(f"教师实际讲授时长: {teacher_dur_match.group(1)}秒 ({teacher_dur_match.group(2)}分钟)")
-
-        total_dur_match = re.search(r"Total class duration:\s*(\d+\.?\d*)s\s*\((\d+\.?\d*)\s*min\)", observations_text)
-        if total_dur_match:
-            stats_lines.append(f"课堂总时长: {total_dur_match.group(1)}秒 ({total_dur_match.group(2)}分钟)")
-
-        ratio_match = re.search(r"Teacher speaking ratio:\s*(\d+\.?\d*)%", observations_text)
-        if ratio_match:
-            stats_lines.append(f"教师讲授占比: {ratio_match.group(1)}%")
-
-        speed_match = re.search(r"Speaking speed:\s*(\d+)\s*chars/min", observations_text)
-        if speed_match:
-            stats_lines.append(f"教师平均语速: {speed_match.group(1)} 字/分（基于教师实际发言时间）")
-
-        question_match = re.search(r"Question count.*?:\s*(\d+)", observations_text)
-        if question_match:
-            stats_lines.append(f"教师提问次数: {question_match.group(1)} 次")
-
-        sentence_match = re.search(r"Total sentences:\s*(\d+)", observations_text)
-        if sentence_match:
-            stats_lines.append(f"教师发言总句数: {sentence_match.group(1)} 句")
-
-        # From get_class_statistics
-        student_match = re.search(r'"student_count"\s*:\s*(\d+)', observations_text)
-        if student_match:
-            stats_lines.append(f"学生出勤人数: {student_match.group(1)} 人")
-
-        raise_match = re.search(r'"raise_up_count"\s*:\s*(\d+)', observations_text)
-        if raise_match:
-            stats_lines.append(f"举手总次数: {raise_match.group(1)} 人次")
-
-        stand_match = re.search(r'"stand_count"\s*:\s*(\d+)', observations_text)
-        if stand_match:
-            stats_lines.append(f"起立总次数: {stand_match.group(1)} 人次")
-
-        if raise_match and student_match:
-            students = int(student_match.group(1))
-            raises = int(raise_match.group(1))
-            avg = round(raises / students, 1) if students > 0 else 0
-            stats_lines.append(f"人均举手次数: {avg} 次")
-
-        # From get_content_segmentation
-        seg_total_match = re.search(r"Total segments:\s*(\d+)", observations_text)
-        if seg_total_match:
-            stats_lines.append(f"内容分段总数: {seg_total_match.group(1)} 段")
-
-        low_period_match = re.search(r"Low activity periods?:\s*(.+?)(?:\n|$)", observations_text)
-        if low_period_match:
-            periods = low_period_match.group(1).strip()
-            if periods and periods != "None detected":
-                stats_lines.append(f"低活跃时段: {periods}")
-
-        # Density info
-        density_matches = re.findall(r"(\d+-\d+min):\s*(\d+)\s*segments", observations_text)
-        if density_matches:
-            density_str = "; ".join([f"{m[0]}: {m[1]}段" for m in density_matches])
-            stats_lines.append(f"各时段活跃度: {density_str}")
-
-        # From get_mindmap — extract topic hierarchy as text
-        mindmap_obs = [obs for obs in self.observations if "[get_mindmap]" in obs]
-        if mindmap_obs:
-            mmd_content = mindmap_obs[0]
-            mmd_text = mmd_content.split("\n", 1)[1] if "\n" in mmd_content else ""
-            try:
-                mmd_json = json.loads(mmd_text.strip())
-                topics = []
-
-                def _walk_nodes(node, depth=0):
-                    topic = node.get("topic", "")
-                    if topic and depth <= 2:
-                        prefix = "  " * depth + "- " if depth > 0 else ""
-                        topics.append(f"{prefix}{topic}")
-                    for child in node.get("children", []):
-                        _walk_nodes(child, depth + 1)
-
-                data = mmd_json.get("data", {})
-                _walk_nodes(data)
-                if topics:
-                    stats_lines.append(f"思维导图知识结构:\n" + "\n".join(topics))
-            except (json.JSONDecodeError, AttributeError, TypeError):
-                pass
-
-        # From get_topic_segmentation — topic titles
-        topic_obs = [obs for obs in self.observations if "[get_topic_segmentation]" in obs]
-        if topic_obs:
-            topic_text = topic_obs[0]
-            try:
-                json_start = topic_text.find("[")
-                if json_start >= 0:
-                    topics_data = json.loads(topic_text[json_start:])
-                    topic_titles = [t.get("topic", "") for t in topics_data if t.get("topic")]
-                    if topic_titles:
-                        stats_lines.append(f"主题关键词: {'、'.join(topic_titles[:10])}")
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        # teacher_name from project config
         project_config = RuntimeConfig.get_section("Project")
-        teacher = project_config.get("teacher_name", "")
-        if teacher:
-            stats_lines.append(f"授课教师: {teacher}")
+        import time as _time
+        meta_info = (
+            f"school_name: {project_config.get('school_name', '')}\n"
+            f"class_name: {project_config.get('class_name', '')}\n"
+            f"course_name: {project_config.get('course_name', '')}\n"
+            f"teacher_name: {project_config.get('teacher_name', '')}\n"
+            f"report_time: {_time.strftime('%Y-%m-%d %H:%M')}\n"
+        )
 
-        return "\n".join(stats_lines) if stats_lines else ""
+        if self.language == "zh":
+            user_content = f"""根据收集到的课堂数据，填写报告模板中的每个字段。
+
+## 基本信息
+{meta_info}
+
+## 报告模板（字段用{{}}标记）：
+{raw_text}
+
+## 收集到的课堂数据：
+{observations_text}
+
+## 输出要求：
+逐行输出每个字段的内容，格式为 "字段名: 填充内容"。
+- 数值直接从数据中提取
+- 分析评估类字段根据数据综合判断
+- 数据不可用的字段填"暂无数据"
+
+需要填写的字段：{', '.join(fields)}"""
+        else:
+            user_content = f"""Based on collected classroom data, fill in each field of the report template.
+
+## Basic Info
+{meta_info}
+
+## Report template (fields marked with {{}}):
+{raw_text}
+
+## Collected classroom data:
+{observations_text}
+
+## Output requirements:
+Output one field per line as "field_name: content".
+- Extract numeric values directly from data
+- Provide analytical assessments based on data
+- Use "Data not available" for unavailable fields
+
+Fields to fill: {', '.join(fields)}"""
+
+        system_msg = ("你是课堂评估报告填写助手。根据数据填充模板字段，简洁准确。"
+                      if self.language == "zh"
+                      else "You are a classroom report assistant. Fill template fields based on data. Be concise and accurate.")
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_content},
+        ]
+        return self.model.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+
+    def _parse_template_fill_response(self, response: str) -> dict:
+        """Parse LLM response in 'field_name: value' format into a dict.
+
+        More tolerant than JSON parsing — handles variations in formatting.
+        """
+        field_values = {}
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip().strip("*").strip()
+            value = value.strip()
+            if key and value:
+                field_values[key] = value
+        return field_values
 
     def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
         """Parse LLM output to extract one or more Action calls.
@@ -492,9 +442,9 @@ class ReportAgent(PipelineComponent):
         logger.info(f"[ReportAgent] ReAct loop completed after {min(step + 1, MAX_REACT_STEPS)} steps. "
                     f"Collected {len(self.observations)} observations.")
 
-    def _call_llm_sync(self, prompt: str, max_new_tokens: int = None) -> str:
+    def _call_llm_sync(self, prompt: str, max_new_tokens: int = None, temperature: float = 0.3) -> str:
         """Call LLM in non-streaming mode and return full text."""
-        result = self.model.generate(prompt, stream=False, max_new_tokens=max_new_tokens)
+        result = self.model.generate(prompt, stream=False, max_new_tokens=max_new_tokens, temperature=temperature)
         if isinstance(result, str):
             if result.startswith("[ERROR]:"):
                 raise RuntimeError(result)
@@ -582,11 +532,10 @@ class ReportAgent(PipelineComponent):
             use_template = is_report and template_path is not None
 
             if use_template:
-                structured_stats = self._extract_structured_stats()
-                logger.info(f"[ReportAgent] Extracted structured stats for LLM context")
-                output_prompt = self._build_report_prompt(use_template=True, structured_stats=structured_stats)
+                output_prompt = self._build_template_fill_prompt(template_path)
+                logger.info(f"[ReportAgent] Template mode: LLM fills template from collected data")
             elif is_report:
-                output_prompt = self._build_report_prompt(use_template=False)
+                output_prompt = self._build_report_prompt()
             else:
                 output_prompt = self._build_chat_prompt()
 
@@ -597,11 +546,12 @@ class ReportAgent(PipelineComponent):
 
             try:
                 if use_template:
-                    # Template mode: generate step (-2) then fill_template step (-1)
+                    # Template mode: LLM reads collected data + template structure,
+                    # outputs field values in "key: value" format (no strict JSON needed)
                     yield {"type": "step_start", "index": -2}
-                    logger.info(f"[ReportAgent] Template mode: generating JSON to fill {template_path}")
+                    logger.info(f"[ReportAgent] Template mode: LLM filling fields for {template_path}")
                     try:
-                        json_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
+                        llm_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
                     except RuntimeError as e:
                         logger.error(f"[ReportAgent] LLM call failed during template fill: {e}")
                         err_msg = (
@@ -613,20 +563,8 @@ class ReportAgent(PipelineComponent):
                         yield {"type": "step_done", "index": -2}
                         return
                     first_token_time = time.perf_counter()
-
-                    try:
-                        field_values = parse_llm_json_response(json_response)
-                    except ValueError as e:
-                        logger.error(f"[ReportAgent] Failed to parse template JSON: {e}")
-                        err_msg = (
-                            "报告生成失败：LLM返回的JSON格式无效，请稍后重试。"
-                            if self.language == "zh"
-                            else "Report generation failed: LLM returned invalid JSON. Please try again."
-                        )
-                        yield {"type": "token", "content": err_msg}
-                        yield {"type": "step_done", "index": -2}
-                        return
-                    logger.info(f"[ReportAgent] Parsed {len(field_values)} fields from LLM response")
+                    field_values = self._parse_template_fill_response(llm_response)
+                    logger.info(f"[ReportAgent] LLM returned {len(field_values)} fields")
                     yield {"type": "step_done", "index": -2}
 
                     # Fill template step

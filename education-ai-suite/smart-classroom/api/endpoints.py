@@ -1108,7 +1108,7 @@ async def unified_chat(request: AgentChatRequest):
         if routing.agent == "general":
             return StreamingResponse(
                 _general_chat_stream(request.message, model),
-                media_type="text/event-stream",
+                media_type="application/json",
             )
 
         request.output_format = routing.output_format
@@ -1128,7 +1128,7 @@ async def _general_chat_stream(message: str, model):
     )
     streamer = model.generate(prompt, stream=True)
     for token in streamer:
-        yield json.dumps({"type": "token", "content": token}) + "\n"
+        yield json.dumps({"token": token}) + "\n"
 
 
 def register_routes(app: FastAPI):

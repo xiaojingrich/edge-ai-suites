@@ -118,9 +118,10 @@ def route_by_llm(message: str, model) -> RoutingResult:
         {"role": "system", "content": """You are an intent classifier for a classroom AI system.
 Classify the user's message into one of these categories:
 - report_full: User wants a complete structured classroom report
-- report_chat: User asks a specific question about class (engagement, content, quiz, etc.)
+- report_chat: User asks a specific question about class data (engagement, content, quiz, teaching analysis, etc.)
 - homework: User wants to create, assign, or grade homework
 - lesson_prep: User wants help preparing a lesson plan
+- general: Greeting, chitchat, or any question unrelated to classroom teaching tasks
 
 Respond with ONLY the category name, nothing else."""},
         {"role": "user", "content": message},
@@ -145,8 +146,10 @@ Respond with ONLY the category name, nothing else."""},
         return RoutingResult(agent="homework", output_format="chat", confidence=0.9)
     elif "lesson_prep" in result:
         return RoutingResult(agent="lesson_prep", output_format="chat", confidence=0.9)
+    elif "general" in result:
+        return RoutingResult(agent="general", output_format="chat", confidence=0.9)
     else:
-        return RoutingResult(agent="report", output_format="chat", confidence=0.6)
+        return RoutingResult(agent="general", output_format="chat", confidence=0.5)
 
 
 class IntentRouter:
