@@ -393,6 +393,9 @@ Fields to fill: {', '.join(fields)}"""
                 action = self._fuzzy_match_tool(action)
 
                 if action == "generate_final_report":
+                    if not self.observations:
+                        logger.warning("[ReportAgent] Model tried to generate without any data — ignoring.")
+                        break
                     should_generate = True
                     break
 
@@ -526,9 +529,6 @@ Fields to fill: {', '.join(fields)}"""
             else:
                 output_prompt = self._build_chat_prompt()
 
-            # Clear report file
-            StorageManager.save(report_path, "", append=False)
-
             first_token_time = None
 
             try:
@@ -580,8 +580,9 @@ Fields to fill: {', '.join(fields)}"""
                     yield {"type": "step_done", "index": -1}
                     yield {"type": "report_ready", "session_id": self.session_id}
 
-                else:
-                    # Streaming mode: LLM generates markdown directly (single generate step)
+                elif is_report:
+                    # Report mode (no template): stream markdown and save to file
+                    StorageManager.save(report_path, "", append=False)
                     yield {"type": "step_start", "index": -1}
                     streamer = self.model.generate(output_prompt, stream=True)
                     for token in streamer:
@@ -589,6 +590,18 @@ Fields to fill: {', '.join(fields)}"""
                             first_token_time = time.perf_counter()
 
                         StorageManager.save_async(report_path, token, append=True)
+                        yield {"type": "token", "content": token}
+
+                    yield {"type": "step_done", "index": -1}
+
+                else:
+                    # Chat mode: stream response without overwriting report file
+                    yield {"type": "step_start", "index": -1}
+                    streamer = self.model.generate(output_prompt, stream=True)
+                    for token in streamer:
+                        if first_token_time is None:
+                            first_token_time = time.perf_counter()
+
                         yield {"type": "token", "content": token}
 
                     yield {"type": "step_done", "index": -1}

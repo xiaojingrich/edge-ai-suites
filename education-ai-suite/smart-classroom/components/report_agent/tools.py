@@ -243,6 +243,11 @@ Action Input: <optional input or "none">"""
             if os.path.exists(os.path.join(self.session_dir, fname)):
                 processed_files.append(fname)
 
+        # Check va subdirectory
+        va_dir = os.path.join(self.session_dir, "va")
+        if os.path.exists(os.path.join(va_dir, "class_statistics.json")):
+            processed_files.append("va/class_statistics.json")
+
         # Check what raw input files exist (audio/video)
         raw_media_files = []
         if os.path.exists(self.session_dir):
