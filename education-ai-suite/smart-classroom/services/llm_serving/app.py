@@ -174,16 +174,29 @@ def _generate_sync(prompt: str, request: ChatCompletionRequest, max_tokens: int)
         return result
     else:
         inputs = tokenizer(prompt, return_tensors="pt")
-        output = pipe.generate(
-            input_ids=inputs.input_ids,
-            max_new_tokens=max_tokens,
-            do_sample=request.do_sample if request.do_sample is not None else True,
-            temperature=max(request.temperature or 0.7, 0.1),
-            top_p=request.top_p or 0.9,
-            top_k=request.top_k or 50,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
+        try:
+            output = pipe.generate(
+                input_ids=inputs.input_ids,
+                max_new_tokens=max_tokens,
+                do_sample=request.do_sample if request.do_sample is not None else True,
+                temperature=max(request.temperature or 0.7, 0.1),
+                top_p=request.top_p or 0.9,
+                top_k=request.top_k or 50,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        except ValueError as e:
+            if "inf" in str(e) or "nan" in str(e):
+                logger.warning(f"Sampling failed ({e}), retrying with greedy decoding...")
+                output = pipe.generate(
+                    input_ids=inputs.input_ids,
+                    max_new_tokens=max_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+            else:
+                raise
         generated_ids = output[:, inputs.input_ids.shape[1]:]
         return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
@@ -242,6 +255,19 @@ async def _stream_generate(prompt, request, max_tokens, request_id, created, mod
                         eos_token_id=tokenizer.eos_token_id,
                         streamer=streamer,
                     )
+                except ValueError as e:
+                    if "inf" in str(e) or "nan" in str(e):
+                        logger.warning(f"Sampling failed ({e}), retrying with greedy decoding...")
+                        pipe.generate(
+                            input_ids=inputs.input_ids,
+                            max_new_tokens=max_tokens,
+                            do_sample=False,
+                            pad_token_id=tokenizer.eos_token_id,
+                            eos_token_id=tokenizer.eos_token_id,
+                            streamer=streamer,
+                        )
+                    else:
+                        logger.error(f"Stream generation error: {e}")
                 except Exception as e:
                     logger.error(f"Stream generation error: {e}")
 

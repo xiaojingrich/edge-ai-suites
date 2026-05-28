@@ -10,6 +10,7 @@ import logging
 import os
 import threading
 import time
+from urllib.parse import urlparse
 from queue import Queue, Empty
 from typing import Iterator
 
@@ -63,6 +64,11 @@ class LLMServiceClient:
         self.base_url = base_url or LLM_SERVICE_URL
         self.model_path = model_path
         self.model_name = os.path.basename(model_path)
+        self._session = requests.Session()
+        # Local health and inference calls must bypass corporate/system proxies.
+        parsed = urlparse(self.base_url)
+        if parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
+            self._session.trust_env = False
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True, fix_mistral_regex=True
         )
@@ -112,14 +118,17 @@ class LLMServiceClient:
     def _sync_request(self, url: str, payload: dict) -> str:
         payload["stream"] = False
         try:
-            resp = requests.post(url, json=payload, timeout=600)
+            resp = self._session.post(url, json=payload, timeout=600)
             if resp.status_code == 429:
                 logger.warning("LLM service busy, retrying in 2s...")
                 time.sleep(2)
-                resp = requests.post(url, json=payload, timeout=600)
+                resp = self._session.post(url, json=payload, timeout=600)
 
             if resp.status_code != 200:
-                logger.error(f"LLM service error: {resp.status_code} {resp.text}")
+                details = (resp.text or "").strip()
+                logger.error(f"LLM service error: {resp.status_code} {details}")
+                if details:
+                    return f"[ERROR]: LLM service returned status {resp.status_code}: {details}"
                 return f"[ERROR]: LLM service returned status {resp.status_code}"
 
             data = resp.json()
@@ -137,7 +146,7 @@ class LLMServiceClient:
 
         def _run():
             try:
-                resp = requests.post(url, json=payload, timeout=600, stream=True)
+                resp = self._session.post(url, json=payload, timeout=600, stream=True)
                 if resp.status_code != 200:
                     logger.error(f"LLM stream error: {resp.status_code}")
                     streamer.put(f"[ERROR]: LLM service returned status {resp.status_code}")
@@ -180,10 +189,11 @@ class LLMServiceClient:
         url = f"{self.base_url}/health"
         while time.monotonic() < deadline:
             try:
-                resp = requests.get(url, timeout=5)
+                resp = self._session.get(url, timeout=5)
                 if resp.status_code == 200:
                     logger.info("LLM service is ready.")
                     return True
+                logger.warning("LLM service health check returned %s", resp.status_code)
             except requests.exceptions.ConnectionError:
                 pass
             time.sleep(2)
