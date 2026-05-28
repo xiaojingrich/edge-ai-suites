@@ -157,6 +157,8 @@ class ContentSegmentationComponent(PipelineComponent):
                         add_generation_prompt=True
                     )
                     full_output = self.model.generate(prompt, False)
+                    if isinstance(full_output, str) and full_output.startswith("[ERROR]:"):
+                        raise RuntimeError(full_output)
                     clean_output = self._clean_topics_output(full_output)
                     logger.info("Topic segmentation completed.")
                     return clean_output

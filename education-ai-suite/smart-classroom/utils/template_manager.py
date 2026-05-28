@@ -218,6 +218,10 @@ def _replace_placeholders_in_paragraph(paragraph, field_values: dict):
 def parse_llm_json_response(response_text: str) -> dict:
     """Parse LLM response as JSON, handling common formatting issues."""
     text = response_text.strip()
+
+    if text.startswith("[ERROR]:"):
+        raise ValueError(f"LLM returned an error instead of JSON: {text}")
+
     if text.startswith('```'):
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text)

@@ -2,6 +2,7 @@ from components.base_component import PipelineComponent
 from utils.runtime_config_loader import RuntimeConfig
 from utils.config_loader import config
 from utils.storage_manager import StorageManager
+import json
 import logging, os
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class MindmapComponent(PipelineComponent):
         try:
             logger.info("Generating mindmap from summary...")
             full_mindmap = self._try_generate(summary_text)
+            full_mindmap = self._normalize_mindmap_json(full_mindmap)
             StorageManager.save(mindmap_path, full_mindmap, append=False)
             logger.info("Mindmap generation completed successfully.")
             return full_mindmap
@@ -41,6 +43,25 @@ class MindmapComponent(PipelineComponent):
         except Exception as e:
             logger.error(f"Mindmap generation failed: {e}")
             raise e
+
+    def _normalize_mindmap_json(self, raw_text: str) -> str:
+        """Normalize common LLM formatting mistakes in jsMind JSON output."""
+        if not isinstance(raw_text, str):
+            return raw_text
+
+        text = raw_text.strip()
+        if text.startswith("[ERROR]:"):
+            return raw_text
+
+        try:
+            data = json.loads(text)
+        except Exception:
+            return raw_text
+
+        if isinstance(data, dict) and not data.get("format") and data.get("!format"):
+            data["format"] = data.pop("!format")
+
+        return json.dumps(data, ensure_ascii=False, indent=2)
 
     def _try_generate(self, text):
         """Attempt generation with truncation retry on probability tensor errors."""
@@ -53,7 +74,10 @@ class MindmapComponent(PipelineComponent):
                     tokenize=False,
                     add_generation_prompt=True
                 )
-                return self.model.generate(prompt, False)
+                result = self.model.generate(prompt, False)
+                if isinstance(result, str) and result.startswith("[ERROR]:"):
+                    raise RuntimeError(result)
+                return result
             except Exception as e:
                 if "probability tensor" in str(e).lower() and attempt == 0:
                     max_input_chars = int(max_input_chars * 0.6)

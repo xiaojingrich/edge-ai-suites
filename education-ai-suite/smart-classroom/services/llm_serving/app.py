@@ -20,7 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -39,6 +39,53 @@ model_lock = threading.Lock()
 pipe = None
 tokenizer = None
 model_ready = False
+
+
+class CancellableTextStreamer:
+    """Wraps TextIteratorStreamer to support mid-generation cancellation.
+
+    When cancel() is called, the next put() call raises StopIteration,
+    which propagates through transformers' generate() loop and stops the
+    background thread, releasing the GPU immediately.
+    """
+
+    def __init__(self, tokenizer, **kwargs):
+        from transformers import TextIteratorStreamer
+        self._inner = TextIteratorStreamer(tokenizer, **kwargs)
+        self._cancelled = threading.Event()
+
+    # Delegate queue / iterator protocol to the inner streamer
+    def __iter__(self):
+        return self._inner.__iter__()
+
+    def __next__(self):
+        return self._inner.__next__()
+
+    def put(self, value):
+        if self._cancelled.is_set():
+            raise StopIteration("Generation cancelled by client disconnect")
+        self._inner.put(value)
+
+    def end(self):
+        self._inner.end()
+
+    def cancel(self):
+        """Signal background thread to stop generating on the next token."""
+        self._cancelled.set()
+        # Unblock the consumer iterator in case it is stuck waiting for a token
+        try:
+            self._inner.text_queue.put(self._inner.stop_signal)
+        except Exception:
+            pass
+
+
+def _is_sampling_instability_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "probability tensor" in msg
+        or "contains either `inf`, `nan` or element < 0" in msg
+        or ("nan" in msg and "inf" in msg)
+    )
 
 
 def _load_model():
@@ -111,7 +158,7 @@ class ChatCompletionRequest(BaseModel):
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(request: ChatCompletionRequest, http_request: Request):
     if not model_ready:
         return JSONResponse(status_code=503, content={"error": "Model not loaded yet."})
 
@@ -131,7 +178,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     if request.stream:
         return StreamingResponse(
-            _stream_generate(prompt, request, max_tokens, request_id, created, model_name),
+            _stream_generate(prompt, request, max_tokens, request_id, created, model_name, http_request),
             media_type="text/event-stream",
         )
 
@@ -185,13 +232,18 @@ def _generate_sync(prompt: str, request: ChatCompletionRequest, max_tokens: int)
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
-        except ValueError as e:
-            if "inf" in str(e) or "nan" in str(e):
+        except Exception as e:
+            if _is_sampling_instability_error(e):
                 logger.warning(f"Sampling failed ({e}), retrying with greedy decoding...")
                 output = pipe.generate(
                     input_ids=inputs.input_ids,
                     max_new_tokens=max_tokens,
                     do_sample=False,
+                    # Explicitly neutralise sampling params to suppress transformers warnings
+                    # when model GenerationConfig has temperature/top_p/top_k stored.
+                    temperature=1.0,
+                    top_p=1.0,
+                    top_k=0,
                     pad_token_id=tokenizer.eos_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                 )
@@ -201,7 +253,7 @@ def _generate_sync(prompt: str, request: ChatCompletionRequest, max_tokens: int)
         return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
 
-async def _stream_generate(prompt, request, max_tokens, request_id, created, model_name):
+async def _stream_generate(prompt, request, max_tokens, request_id, created, model_name, http_request: Request = None):
     if not model_lock.acquire(blocking=False):
         yield f"data: {json.dumps({'error': 'Model is busy'})}\n\n"
         return
@@ -222,7 +274,22 @@ async def _stream_generate(prompt, request, max_tokens, request_id, created, mod
                         do_sample=request.do_sample if request.do_sample is not None else True,
                     )
                 except Exception as e:
-                    logger.error(f"Stream generation error: {e}")
+                    if _is_sampling_instability_error(e):
+                        logger.warning(f"Stream sampling failed ({e}), retrying with greedy decoding...")
+                        try:
+                            pipe.generate(
+                                prompt,
+                                streamer=streamer,
+                                max_new_tokens=max_tokens,
+                                do_sample=False,
+                                temperature=1.0,
+                                top_p=1.0,
+                                top_k=0,
+                            )
+                        except Exception as e2:
+                            logger.error(f"Stream greedy fallback failed: {e2}")
+                    else:
+                        logger.error(f"Stream generation error: {e}")
                 finally:
                     streamer.end()
 
@@ -237,9 +304,7 @@ async def _stream_generate(prompt, request, max_tokens, request_id, created, mod
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
         else:
-            from transformers import TextIteratorStreamer
-
-            streamer = TextIteratorStreamer(tokenizer, skip_special_tokens=True, skip_prompt=True)
+            streamer = CancellableTextStreamer(tokenizer, skip_special_tokens=True, skip_prompt=True, timeout=10.0)
             inputs = tokenizer(prompt, return_tensors="pt")
 
             def run():
@@ -255,32 +320,50 @@ async def _stream_generate(prompt, request, max_tokens, request_id, created, mod
                         eos_token_id=tokenizer.eos_token_id,
                         streamer=streamer,
                     )
-                except ValueError as e:
-                    if "inf" in str(e) or "nan" in str(e):
+                except StopIteration:
+                    logger.info("Stream generation stopped by client disconnect.")
+                except Exception as e:
+                    if _is_sampling_instability_error(e):
                         logger.warning(f"Sampling failed ({e}), retrying with greedy decoding...")
-                        pipe.generate(
-                            input_ids=inputs.input_ids,
-                            max_new_tokens=max_tokens,
-                            do_sample=False,
-                            pad_token_id=tokenizer.eos_token_id,
-                            eos_token_id=tokenizer.eos_token_id,
-                            streamer=streamer,
-                        )
+                        try:
+                            pipe.generate(
+                                input_ids=inputs.input_ids,
+                                max_new_tokens=max_tokens,
+                                do_sample=False,
+                                temperature=1.0,
+                                top_p=1.0,
+                                top_k=0,
+                                pad_token_id=tokenizer.eos_token_id,
+                                eos_token_id=tokenizer.eos_token_id,
+                                streamer=streamer,
+                            )
+                        except StopIteration:
+                            logger.info("Greedy stream stopped by client disconnect.")
+                        except Exception as e2:
+                            logger.error(f"Stream greedy fallback failed: {e2}")
                     else:
                         logger.error(f"Stream generation error: {e}")
-                except Exception as e:
-                    logger.error(f"Stream generation error: {e}")
+                finally:
+                    streamer.end()
 
             threading.Thread(target=run, daemon=True).start()
-            for token in streamer:
-                chunk = {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+            try:
+                for token in streamer:
+                    if http_request and await http_request.is_disconnected():
+                        logger.info("Client disconnected — cancelling stream generation.")
+                        streamer.cancel()
+                        return
+                    chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_name,
+                        "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            except Exception:
+                streamer.cancel()
+                return
 
         final = {
             "id": request_id,

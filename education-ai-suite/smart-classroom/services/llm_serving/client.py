@@ -125,10 +125,7 @@ class LLMServiceClient:
                 resp = self._session.post(url, json=payload, timeout=600)
 
             if resp.status_code != 200:
-                details = (resp.text or "").strip()
-                logger.error(f"LLM service error: {resp.status_code} {details}")
-                if details:
-                    return f"[ERROR]: LLM service returned status {resp.status_code}: {details}"
+                logger.error(f"LLM service error: {resp.status_code} {resp.text}")
                 return f"[ERROR]: LLM service returned status {resp.status_code}"
 
             data = resp.json()

@@ -105,8 +105,8 @@ def route_by_keyword(message: str) -> RoutingResult:
     if _match_patterns(message, _LESSON_PREP_PATTERNS):
         return RoutingResult(agent="lesson_prep", output_format="chat", confidence=0.8)
 
-    # Default: route to report agent in chat mode (most likely intent in classroom context)
-    return RoutingResult(agent="report", output_format="chat", confidence=0.5)
+    # Default: general chat — no data collection needed
+    return RoutingResult(agent="general", output_format="chat", confidence=0.5)
 
 
 def route_by_llm(message: str, model) -> RoutingResult:

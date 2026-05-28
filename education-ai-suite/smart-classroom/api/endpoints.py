@@ -1093,12 +1093,10 @@ async def unified_chat(request: AgentChatRequest):
     if router_enabled and not request.output_format:
         router_mode = getattr(router_config, 'mode', 'keyword')
 
-        model = None
-        if router_mode == "llm":
-            from components.summarizer_component import SummarizerComponent
-            model = SummarizerComponent._model
+        from components.summarizer_component import SummarizerComponent
+        model = SummarizerComponent._model
 
-        intent_router = IntentRouter(mode=router_mode, model=model)
+        intent_router = IntentRouter(mode=router_mode, model=model if router_mode == "llm" else None)
         routing = intent_router.route(request.message)
 
         if routing.agent in ("homework", "lesson_prep"):
@@ -1107,9 +1105,30 @@ async def unified_chat(request: AgentChatRequest):
                 status_code=501,
             )
 
+        if routing.agent == "general":
+            return StreamingResponse(
+                _general_chat_stream(request.message, model),
+                media_type="text/event-stream",
+            )
+
         request.output_format = routing.output_format
 
     return await agent_chat(request)
+
+
+async def _general_chat_stream(message: str, model):
+    """Direct LLM response for general chat — no report agent, no data collection."""
+    prompt = model.tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": "You are a helpful classroom assistant. Answer the user's question concisely."},
+            {"role": "user", "content": message},
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    streamer = model.generate(prompt, stream=True)
+    for token in streamer:
+        yield json.dumps({"type": "token", "content": token}) + "\n"
 
 
 def register_routes(app: FastAPI):

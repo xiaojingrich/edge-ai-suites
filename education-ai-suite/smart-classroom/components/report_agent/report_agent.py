@@ -492,10 +492,12 @@ class ReportAgent(PipelineComponent):
         logger.info(f"[ReportAgent] ReAct loop completed after {min(step + 1, MAX_REACT_STEPS)} steps. "
                     f"Collected {len(self.observations)} observations.")
 
-    def _call_llm_sync(self, prompt: str) -> str:
+    def _call_llm_sync(self, prompt: str, max_new_tokens: int = None) -> str:
         """Call LLM in non-streaming mode and return full text."""
-        result = self.model.generate(prompt, stream=False)
+        result = self.model.generate(prompt, stream=False, max_new_tokens=max_new_tokens)
         if isinstance(result, str):
+            if result.startswith("[ERROR]:"):
+                raise RuntimeError(result)
             return result
         return str(result)
 
@@ -598,10 +600,32 @@ class ReportAgent(PipelineComponent):
                     # Template mode: generate step (-2) then fill_template step (-1)
                     yield {"type": "step_start", "index": -2}
                     logger.info(f"[ReportAgent] Template mode: generating JSON to fill {template_path}")
-                    json_response = self._call_llm_sync(output_prompt)
+                    try:
+                        json_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
+                    except RuntimeError as e:
+                        logger.error(f"[ReportAgent] LLM call failed during template fill: {e}")
+                        err_msg = (
+                            "报告生成失败：LLM服务超时或出错，请稍后重试。"
+                            if self.language == "zh"
+                            else "Report generation failed: LLM service timed out or returned an error. Please try again."
+                        )
+                        yield {"type": "token", "content": err_msg}
+                        yield {"type": "step_done", "index": -2}
+                        return
                     first_token_time = time.perf_counter()
 
-                    field_values = parse_llm_json_response(json_response)
+                    try:
+                        field_values = parse_llm_json_response(json_response)
+                    except ValueError as e:
+                        logger.error(f"[ReportAgent] Failed to parse template JSON: {e}")
+                        err_msg = (
+                            "报告生成失败：LLM返回的JSON格式无效，请稍后重试。"
+                            if self.language == "zh"
+                            else "Report generation failed: LLM returned invalid JSON. Please try again."
+                        )
+                        yield {"type": "token", "content": err_msg}
+                        yield {"type": "step_done", "index": -2}
+                        return
                     logger.info(f"[ReportAgent] Parsed {len(field_values)} fields from LLM response")
                     yield {"type": "step_done", "index": -2}
 

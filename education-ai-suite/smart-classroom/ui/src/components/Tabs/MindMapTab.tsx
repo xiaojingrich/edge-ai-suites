@@ -31,6 +31,16 @@ declare global {
 
 const activeMindmapSessions = new Set<string>();
 
+const normalizeJsMindData = (data: any): any => {
+  if (!data || typeof data !== 'object') return data;
+  // Common LLM typo: output uses "!format" instead of "format".
+  if (!data.format && data["!format"]) {
+    data.format = data["!format"];
+    delete data["!format"];
+  }
+  return data;
+};
+
 const validateJsMindData = (data: any): boolean => {
   try {
     if (!data || typeof data !== 'object') return false;
@@ -67,7 +77,7 @@ const extractFirstJsonObject = (text: string): string | null => {
 
 const tryParse = (s: string): any | null => {
   try {
-    const p = JSON.parse(s);
+    const p = normalizeJsMindData(JSON.parse(s));
     if (validateJsMindData(p)) return p;
   } catch {}
   return null;
