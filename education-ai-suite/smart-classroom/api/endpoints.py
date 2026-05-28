@@ -935,10 +935,14 @@ async def agent_chat(request: AgentChatRequest):
         conv = conv_manager.get_conversation(conversation_id)
         if conv is None:
             raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found.")
+        # Check if user message was already added by the /chat unified entry point
+        messages = conv.get("messages", [])
+        if not messages or messages[-1].get("content") != request.message or messages[-1].get("role") != "user":
+            conv_manager.add_message(conversation_id, "user", request.message)
     else:
         conversation_id = conv_manager.create_conversation()
+        conv_manager.add_message(conversation_id, "user", request.message)
 
-    conv_manager.add_message(conversation_id, "user", request.message)
     previous_observations = conv_manager.get_observations(conversation_id)
 
     pipeline = Pipeline(session_id)
@@ -988,6 +992,62 @@ async def agent_chat(request: AgentChatRequest):
             yield json.dumps({"type": "report_ready", "session_id": session_id, "conversation_id": conversation_id}) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/json")
+
+
+@router.get("/conversations/{session_id}")
+def list_conversations(session_id: str):
+    """List all conversations for a session with preview of last message."""
+    from components.report_agent.conversation import ConversationManager
+
+    conv_manager = ConversationManager(session_id)
+    conversations = []
+
+    if not os.path.exists(conv_manager.conversations_dir):
+        return {"conversations": []}
+
+    for filename in sorted(os.listdir(conv_manager.conversations_dir), reverse=True):
+        if not filename.endswith(".json"):
+            continue
+        conv_id = filename.replace(".json", "")
+        conv = conv_manager.get_conversation(conv_id)
+        if conv and conv.get("messages"):
+            messages = conv["messages"]
+            first_user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
+            conversations.append({
+                "conversation_id": conv_id,
+                "created_at": conv.get("created_at", ""),
+                "preview": first_user_msg[:50],
+                "message_count": len(messages),
+            })
+
+    return {"conversations": conversations}
+
+
+@router.get("/conversations/{session_id}/{conversation_id}")
+def get_conversation_messages(session_id: str, conversation_id: str):
+    """Load full message history for a conversation."""
+    from components.report_agent.conversation import ConversationManager
+
+    conv_manager = ConversationManager(session_id)
+    conv = conv_manager.get_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found.")
+
+    return {
+        "conversation_id": conversation_id,
+        "messages": conv.get("messages", []),
+    }
+
+
+@router.delete("/conversations/{session_id}/{conversation_id}")
+def delete_conversation(session_id: str, conversation_id: str):
+    """Delete a conversation."""
+    from components.report_agent.conversation import ConversationManager
+
+    conv_manager = ConversationManager(session_id)
+    if conv_manager.delete_conversation(conversation_id):
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found.")
 
 
 @router.get("/report/{session_id}")
@@ -1081,54 +1141,11 @@ def upload_report_template(file: UploadFile = File(...)):
 @router.post("/chat")
 async def unified_chat(request: AgentChatRequest):
     """
-    Unified chat endpoint with intent routing.
+    Unified chat endpoint — delegates to the Orchestrator.
     Primary entry point for the frontend UI when OpenClaw is not deployed.
     """
-    from components.intent_router import IntentRouter
-    from utils.config_loader import config as app_config
-
-    router_config = getattr(app_config, 'router', None)
-    router_enabled = getattr(router_config, 'enabled', False) if router_config else False
-
-    if router_enabled and not request.output_format:
-        router_mode = getattr(router_config, 'mode', 'keyword')
-
-        from components.summarizer_component import SummarizerComponent
-        model = SummarizerComponent._model
-
-        intent_router = IntentRouter(mode=router_mode, model=model if router_mode == "llm" else None)
-        routing = intent_router.route(request.message)
-
-        if routing.agent in ("homework", "lesson_prep"):
-            return JSONResponse(
-                content={"error": f"Agent '{routing.agent}' is not yet implemented."},
-                status_code=501,
-            )
-
-        if routing.agent == "general":
-            return StreamingResponse(
-                _general_chat_stream(request.message, model),
-                media_type="application/json",
-            )
-
-        request.output_format = routing.output_format
-
-    return await agent_chat(request)
-
-
-async def _general_chat_stream(message: str, model):
-    """Direct LLM response for general chat — no report agent, no data collection."""
-    prompt = model.tokenizer.apply_chat_template(
-        [
-            {"role": "system", "content": "You are a helpful classroom assistant. Answer the user's question concisely."},
-            {"role": "user", "content": message},
-        ],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    streamer = model.generate(prompt, stream=True)
-    for token in streamer:
-        yield json.dumps({"token": token}) + "\n"
+    from components.orchestrator import orchestrator
+    return await orchestrator.handle_chat(request)
 
 
 def register_routes(app: FastAPI):

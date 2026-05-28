@@ -51,6 +51,9 @@ _REPORT_PATTERNS = [
     r"mind\s*map",
     r"teacher\s*(behavior|style|movement)",
     r"(board|ppt|slide).*(analysis|content)",
+    r"(engagement|participation|interaction|attention)",
+    r"(which|what|when|how).*(period|time|moment|student|class|teach|engag|particip|attend)",
+    r"(最|哪个|什么时候).*(参与|活跃|互动|注意力|时段|时间)",
 ]
 
 _REPORT_KEYWORDS_FULL_REPORT = [

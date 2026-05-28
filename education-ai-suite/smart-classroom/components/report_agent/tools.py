@@ -76,6 +76,19 @@ Tool/Skill Call Format:
 Action: <name>
 Action Input: <optional input or "none">"""
 
+    def get_available_tools(self) -> list[str]:
+        """Return list of all registered tool/skill names."""
+        return [
+            "get_session_metadata", "get_class_report", "get_class_statistics",
+            "get_class_summary", "get_mindmap", "get_topic_segmentation",
+            "get_transcription", "get_teacher_transcription", "get_content_segmentation",
+            "get_memory", "save_memory",
+            "skill_engagement_analysis", "skill_video_slice_summary",
+            "skill_content_analysis", "skill_ocr_board_analysis",
+            "skill_quiz_generation", "skill_teacher_behavior",
+            "generate_final_report",
+        ]
+
     def execute_tool(self, tool_name: str, tool_input: str = "none") -> str:
         """Execute a tool or skill by name and return its observation."""
         read_tools = {

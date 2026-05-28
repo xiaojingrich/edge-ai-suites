@@ -62,8 +62,10 @@ class ConversationManager:
         except json.JSONDecodeError:
             return None
 
+    MAX_MESSAGES = 50
+
     def add_message(self, conversation_id: str, role: str, content: str) -> None:
-        """Add a message to the conversation history."""
+        """Add a message to the conversation history. Older messages are pruned if limit exceeded."""
         conv = self.get_conversation(conversation_id)
         if conv is None:
             return
@@ -73,6 +75,9 @@ class ConversationManager:
             "content": content,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         })
+
+        if len(conv["messages"]) > self.MAX_MESSAGES:
+            conv["messages"] = conv["messages"][-self.MAX_MESSAGES:]
 
         self._save_conversation(conversation_id, conv)
 
@@ -102,6 +107,14 @@ class ConversationManager:
         if conv is None:
             return []
         return conv.get("agent_observations", [])
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """Delete a conversation file. Returns True if deleted."""
+        conv_path = self._get_conv_path(conversation_id)
+        if os.path.exists(conv_path):
+            os.remove(conv_path)
+            return True
+        return False
 
     def _get_conv_path(self, conversation_id: str) -> str:
         return os.path.join(self.conversations_dir, f"{conversation_id}.json")

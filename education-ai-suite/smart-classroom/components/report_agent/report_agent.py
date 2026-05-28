@@ -34,7 +34,7 @@ from utils.template_manager import (
 
 logger = logging.getLogger(__name__)
 
-MAX_REACT_STEPS = 10
+MAX_REACT_STEPS = 6
 
 
 class ReportAgent(PipelineComponent):
@@ -201,6 +201,7 @@ class ReportAgent(PipelineComponent):
 
 ## 输出要求：
 逐行输出每个字段的内容，格式为 "字段名: 填充内容"。
+- 重要：字段值会直接替换模板中的 {{字段名}}。注意观察模板中字段前后是否已有单位：如果有（如"教师提问 {{question_count}} 次"），则只填纯数值"14"；如果没有（如"时长：{{duration}}"），则需要带上单位"5.0 分钟"
 - 数值直接从数据中提取
 - 分析评估类字段根据数据综合判断
 - 数据不可用的字段填"暂无数据"
@@ -220,6 +221,7 @@ class ReportAgent(PipelineComponent):
 
 ## Output requirements:
 Output one field per line as "field_name: content".
+- Important: field values directly replace {{field_name}} in the template. Check if the template already has units around the field: if yes (e.g., "asked {{question_count}} questions"), output only the number "14"; if no (e.g., "Duration: {{duration}}"), include the unit "5.0 minutes"
 - Extract numeric values directly from data
 - Provide analytical assessments based on data
 - Use "Data not available" for unavailable fields
@@ -295,77 +297,48 @@ Fields to fill: {', '.join(fields)}"""
 
         return actions
 
-    def _can_use_fast_path(self) -> bool:
-        """Determine if we can skip the ReAct loop entirely."""
-        if self.observations:
-            return False
+    def _fuzzy_match_tool(self, action: str) -> str:
+        """Fuzzy match an action name to a registered tool (handles 7B model typos)."""
+        available = self.tools.get_available_tools()
+        if action in available:
+            return action
 
-        if self._is_report_request():
-            return True
+        action_lower = action.lower().strip()
+        for tool in available:
+            if tool.lower() == action_lower:
+                return tool
 
-        report_path = os.path.join(self._get_session_dir(), "class_report.md")
-        if os.path.exists(report_path):
-            return True
+        for tool in available:
+            if action_lower in tool.lower() or tool.lower() in action_lower:
+                return tool
 
-        return False
+        return action
 
-    def _run_fast_collection(self):
-        """Collect all available data without LLM decision-making. Yields plan + step events."""
-        session_dir = self._get_session_dir()
-        report_path = os.path.join(session_dir, "class_report.md")
-
-        if not self._is_report_request() and os.path.exists(report_path):
-            plan_steps = [
-                {"action": "intent_analysis", "thought": "理解用户意图" if self.language == "zh" else "Understand user intent", "llm": False},
-                {"action": "get_class_report", "thought": "读取已有报告" if self.language == "zh" else "Read existing report", "llm": False},
-                {"action": "generate", "thought": "生成回复" if self.language == "zh" else "Generate response", "llm": True},
-            ]
-            yield {"type": "plan", "steps": plan_steps}
-            yield {"type": "step_start", "index": 0}
-            yield {"type": "step_done", "index": 0}
-            yield {"type": "step_start", "index": 1}
-            obs = self.tools.execute_tool("get_class_report", "none")
-            self.observations.append(f"[get_class_report] {obs}")
-            self.trajectory.append("Fast path: read existing report for follow-up question")
-            yield {"type": "step_done", "index": 1}
-            logger.info("[ReportAgent] Fast path: using existing report for follow-up")
-            return
+    def _run_workflow_fallback(self):
+        """Deterministic fallback: collect all data without LLM decision-making."""
+        logger.warning("[ReportAgent] Falling back to workflow mode (ReAct failed)")
 
         read_tools = [
-            ("get_class_statistics", "读取课堂统计数据" if self.language == "zh" else "Reading class statistics"),
-            ("get_class_summary", "读取课堂摘要" if self.language == "zh" else "Reading class summary"),
-            ("get_mindmap", "读取知识图谱" if self.language == "zh" else "Reading mind map"),
-            ("get_topic_segmentation", "读取主题分段" if self.language == "zh" else "Reading topic segmentation"),
-            ("get_teacher_transcription", "读取教师转录" if self.language == "zh" else "Reading teacher transcription"),
-            ("get_content_segmentation", "读取内容分段转录" if self.language == "zh" else "Reading content segmentation"),
+            ("get_class_statistics", "读取课堂统计" if self.language == "zh" else "Read class statistics"),
+            ("get_class_summary", "读取课堂摘要" if self.language == "zh" else "Read class summary"),
+            ("get_mindmap", "读取思维导图" if self.language == "zh" else "Read mind map"),
+            ("get_topic_segmentation", "读取主题分段" if self.language == "zh" else "Read topic segmentation"),
+            ("get_teacher_transcription", "读取教师转录" if self.language == "zh" else "Read teacher transcription"),
+            ("get_content_segmentation", "读取内容分段" if self.language == "zh" else "Read content segmentation"),
         ]
 
-        template_path = get_template_path(self.language, self.session_id)
-        plan_steps = [
-            {"action": "intent_analysis", "thought": "理解用户意图 → 生成报告" if self.language == "zh" else "Understand intent → generate report", "llm": False},
-        ]
-        plan_steps += [{"action": t[0], "thought": t[1], "llm": False} for t in read_tools]
-        if template_path:
-            plan_steps.append({"action": "generate", "thought": "LLM 生成报告内容" if self.language == "zh" else "LLM generates report content", "llm": True})
-            plan_steps.append({"action": "fill_template", "thought": "填充报告模板 → Word" if self.language == "zh" else "Fill report template → Word", "llm": False})
-        else:
-            plan_steps.append({"action": "generate", "thought": "基于数据生成报告" if self.language == "zh" else "Generate report from data", "llm": True})
+        plan_steps = [{"action": t[0], "thought": t[1], "llm": False} for t in read_tools]
+        plan_steps.append({"action": "generate", "thought": "生成报告" if self.language == "zh" else "Generate report", "llm": True})
         yield {"type": "plan", "steps": plan_steps}
 
-        yield {"type": "step_start", "index": 0}
-        yield {"type": "step_done", "index": 0}
-
-        for i, (tool_name, desc) in enumerate(read_tools):
-            yield {"type": "step_start", "index": i + 1}
+        for i, (tool_name, _) in enumerate(read_tools):
+            yield {"type": "step_start", "index": i}
             obs = self.tools.execute_tool(tool_name, "none")
             if "NOT available" not in obs and "is empty" not in obs:
                 self.observations.append(f"[{tool_name}] {obs}")
-            yield {"type": "step_done", "index": i + 1}
+            yield {"type": "step_done", "index": i}
 
-        self.trajectory.append(
-            f"Fast path: collected {len(self.observations)} data sources without ReAct loop"
-        )
-        logger.info(f"[ReportAgent] Fast path: collected {len(self.observations)} observations (0 LLM calls)")
+        self.trajectory.append(f"Workflow fallback: collected {len(self.observations)} data sources")
 
     def _run_react_loop(self):
         """Execute the ReAct reasoning loop with multi-action support. Yields plan + step events."""
@@ -384,7 +357,15 @@ Fields to fill: {', '.join(fields)}"""
             logger.info(f"[ReportAgent] Step {step + 1}/{MAX_REACT_STEPS}")
 
             prompt = self._build_react_prompt(history)
-            llm_response = self._call_llm_sync(prompt)
+
+            try:
+                llm_response = self._call_llm_sync(prompt)
+            except RuntimeError as e:
+                logger.error(f"[ReportAgent] LLM failed at step {step + 1}: {e}")
+                if step == 0:
+                    yield {"type": "step_done", "index": 0}
+                self.trajectory.append(f"Step {step + 1}: LLM ERROR — {e}")
+                break
 
             logger.info(f"[ReportAgent] LLM response:\n{llm_response[:300]}...")
 
@@ -397,6 +378,8 @@ Fields to fill: {', '.join(fields)}"""
 
             if not actions:
                 logger.warning("[ReportAgent] Could not parse action from LLM output. Forcing generate_final_report.")
+                if step == 0:
+                    yield {"type": "step_done", "index": 0}
                 break
 
             if step == 0:
@@ -407,6 +390,8 @@ Fields to fill: {', '.join(fields)}"""
             step_observations = []
 
             for action, action_input in actions:
+                action = self._fuzzy_match_tool(action)
+
                 if action == "generate_final_report":
                     should_generate = True
                     break
@@ -429,8 +414,9 @@ Fields to fill: {', '.join(fields)}"""
                     should_generate = True
                     break
 
-                self.observations.append(f"[{action}] {observation}")
-                step_observations.append(f"Action: {action}\n{observation}")
+                if "NOT available" not in observation and "is empty" not in observation:
+                    self.observations.append(f"[{action}] {observation}")
+                step_observations.append(f"Action: {action}\nObservation: {observation}")
                 yield {"type": "step_done", "index": step_index}
                 step_index += 1
 
@@ -478,20 +464,21 @@ Fields to fill: {', '.join(fields)}"""
         logger.info("[ReportAgent] Model acquired — will hold until report generation completes.")
 
         try:
-            # Phase 1: Data collection (yields thinking events)
-            if self._can_use_fast_path():
-                logger.info("[ReportAgent] Using fast path — skipping ReAct loop")
-                for event in self._run_fast_collection():
-                    yield event
-            else:
-                logger.info("[ReportAgent] Using ReAct loop — LLM-guided tool selection")
-                for event in self._run_react_loop():
+            # Phase 1: Data collection — LLM decides which tools to call
+            logger.info("[ReportAgent] Starting ReAct loop — LLM-guided tool selection")
+            for event in self._run_react_loop():
+                yield event
+
+            # Fallback: if ReAct failed to collect any data, try workflow mode
+            if not self.observations:
+                logger.warning("[ReportAgent] ReAct collected nothing — trying workflow fallback")
+                for event in self._run_workflow_fallback():
                     yield event
 
             react_time = time.perf_counter() - start
             logger.info(f"[ReportAgent] Data collection phase completed in {react_time:.2f}s")
 
-            # Early exit: if no observations collected, no classroom data exists
+            # Early exit: if still no observations, no classroom data exists
             if not self.observations:
                 no_data_msg = "当前无课堂记录数据，请先完成一节课的录制。" if self.language == "zh" else "No classroom recording data available. Please complete a class session first."
                 logger.warning(f"[ReportAgent] No data found for session {self.session_id}")

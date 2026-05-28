@@ -4,7 +4,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    OpenClaw (唯一入口, 路由 + 编排)                              │
+│                    OpenClaw (可选入口, 云端路由 + 编排)                           │
 │                                                                                 │
 │  ┌─── Provider (云端) ──────────────┐  ┌─── Provider (本地) ──────────────────┐│
 │  │  Cloud LLM (GPT-4o / Claude)     │  │  Smart Classroom /v1/chat/completions ││
@@ -22,15 +22,29 @@
                                        │ HTTP (localhost)
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    Smart Classroom (执行层, 不做路由)                             │
+│                    Smart Classroom (执行层 + 本地编排)                            │
+│                                                                                 │
+│  ┌── Orchestrator (本地编排层, 替代 OpenClaw) ──────────────────────────────┐   │
+│  │  POST /chat → Orchestrator.handle_chat()                                │   │
+│  │    1. 管理会话 (session + conversation)                                  │   │
+│  │    2. IntentRouter 意图分类 (keyword/llm)                                │   │
+│  │    3. 分发到 registered handlers:                                        │   │
+│  │       ├── "general"     → LLM 直接回答 (带上下文)                        │   │
+│  │       ├── "report"      → Report Agent (学情)                            │   │
+│  │       ├── "homework"    → Homework Agent (future)                        │   │
+│  │       └── "lesson_prep" → Lesson Prep Agent (future)                     │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
 │                                                                                 │
 │  API Endpoints:                                                                 │
-│  ├── POST /chat              ← 统一入口 (含 Intent Router)                      │
-│  ├── POST /agent/chat        ← 学情Agent (多轮对话, 支持 output_format)         │
+│  ├── POST /chat              ← 统一入口 → Orchestrator                          │
+│  ├── POST /agent/chat        ← 学情Agent 直接入口 (OpenClaw 调用)               │
 │  ├── POST /generate-report   ← 学情Agent (单次报告)                             │
 │  ├── GET  /report/{id}       ← 获取已生成的报告                                │
 │  ├── GET  /report/{id}/download ← 下载 Word 格式报告                           │
 │  ├── POST /report/template/upload ← 上传自定义报告模板                          │
+│  ├── GET  /conversations/{session_id}          ← 会话列表                       │
+│  ├── GET  /conversations/{session_id}/{id}     ← 会话消息                       │
+│  ├── DELETE /conversations/{session_id}/{id}   ← 删除会话                       │
 │  ├── POST /homework/...      ← 作业Agent (future)                              │
 │  └── POST /lesson-prep/...   ← 备课Agent (future)                              │
 │                                                                                 │
@@ -47,9 +61,9 @@
 
 ---
 
-## Report Agent 双路径架构
+## Report Agent 架构 — 纯 ReAct Agent
 
-Report Agent 有两条执行路径：**Fast Path**（快速路径）和 **ReAct Loop**（推理循环）。
+Report Agent 是真正的 Agent：**LLM 自主决定调用哪些工具、何时停止收集、何时生成输出**。
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -59,59 +73,70 @@ Report Agent 有两条执行路径：**Fast Path**（快速路径）和 **ReAct 
 │        │                                                         │
 │        ▼                                                         │
 │  ┌─────────────────────────────────────┐                        │
-│  │  _can_use_fast_path()?              │                        │
+│  │  ReAct Loop (LLM 自主决策)           │                        │
 │  │                                     │                        │
-│  │  YES if:                            │                        │
-│  │  - 首次报告请求 (_is_report_request)│                        │
-│  │  - 已有报告 + 追问                  │                        │
-│  └───────┬─────────────────┬───────────┘                        │
-│      YES │                 │ NO                                  │
-│          ▼                 ▼                                     │
-│  ┌─────────────────┐  ┌─────────────────┐                      │
-│  │  Fast Path      │  │  ReAct Loop     │                      │
-│  │  0 LLM calls    │  │  LLM-guided     │                      │
-│  │  直接读全部数据  │  │  自主决定工具    │                      │
-│  └────────┬────────┘  └────────┬────────┘                      │
-│           │                    │                                 │
-│           └────────┬───────────┘                                │
-│                    ▼                                             │
+│  │  Step 1: get_session_metadata       │                        │
+│  │  Step 2: LLM 决定调哪些工具         │                        │
+│  │         (支持批量调用)              │                        │
+│  │  Step 3: generate_final_report      │                        │
+│  │                                     │                        │
+│  │  最多 6 步，目标 2-3 步             │                        │
+│  └───────────────┬─────────────────────┘                        │
+│                  │                                               │
+│                  ▼                                               │
 │  ┌─────────────────────────────────────┐                        │
 │  │  Phase 2: 生成阶段                  │                        │
 │  │                                     │                        │
-│  │  有模板 → LLM 输出 JSON → 填充 .docx│                        │
+│  │  有模板 → LLM 填充字段 → .docx      │                        │
 │  │  无模板 → LLM 流式输出 Markdown      │                        │
 │  └─────────────────────────────────────┘                        │
-│                    │                                             │
+│                  │                                               │
 │  model.release_model()                                           │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-### Fast Path（快速路径 — 0 LLM 推理调用）
+### ReAct Loop（推理循环）
 
-适用条件：
-- 用户请求完整报告（关键词匹配）
-- 已有 `class_report.md` 且用户在追问
+所有请求统一走 ReAct Loop，LLM 自主决策：
 
-执行过程：
-1. `intent_analysis` — 直接判定意图（无 LLM）
-2. 依次调用所有 READ 工具收集数据
-3. 进入生成阶段
+**完整报告请求**（"生成完整报告"）：
+```
+Step 1: get_session_metadata → 了解可用文件
+Step 2: Actions (批量):
+        - get_class_statistics
+        - get_class_summary
+        - get_mindmap
+        - get_topic_segmentation
+        - get_teacher_transcription
+        - get_content_segmentation
+Step 3: generate_final_report
+```
+LLM 调用 2 次（规划 + 生成），工具调用 1 步完成。
 
-**优势**：数据收集阶段无 LLM 调用，仅在最终生成时使用一次 LLM。
+**具体问题**（"哪个时段参与度最低"）：
+```
+Step 1: get_session_metadata
+Step 2: Actions (批量):
+        - get_class_statistics
+        - get_content_segmentation
+Step 3: generate_final_report
+```
+LLM 只收集相关数据，不过度收集。
 
-### ReAct Loop（推理循环 — LLM 引导）
+**追问已有报告**：
+```
+Step 1: get_session_metadata → 看到 class_report.md 存在
+Step 2: get_class_report → 读取已有报告
+Step 3: generate_final_report（或补充调用其他工具）
+```
+LLM 自行判断是否需要原始数据。
 
-适用条件：
-- 具体问题（"参与度如何"、"出几道测验题"）
-- 需要 LLM 判断该收集哪些数据
+### 健壮性保护
 
-执行过程：
-1. `intent_analysis` — LLM 分析意图并规划
-2. LLM 逐步决定调用哪些工具（支持批量调用）
-3. 收集到足够数据后调用 `generate_final_report`
-4. 进入生成阶段
-
-最多 10 步，目标 3-5 步完成。
+- **最多 6 步**：防止推理发散
+- **模糊工具名匹配**：7B 模型可能 typo，自动纠正
+- **LLM 错误容错**：推理步骤中 LLM 失败则终止收集，用已有数据生成
+- **不可用数据自动跳过**：工具返回 "NOT available" 时不计入 observations
 
 ---
 
@@ -295,9 +320,13 @@ step_done   → 将指定步骤标为 done
 Header.tsx
   └── [🤖 Agent] button (agent-nav-btn)
       └── AgentChatDialog.tsx (浮动对话框)
-          ├── PlanBlock (计划进度组件)
-          ├── ReactMarkdown (回复渲染)
-          └── Download button (report_ready 时显示)
+          ├── Header: [☰ History] [title] [+New] [×Close]
+          ├── HistoryPanel (可折叠会话列表)
+          ├── Messages Area
+          │   ├── PlanBlock (计划进度组件)
+          │   ├── ReactMarkdown (回复渲染)
+          │   └── Download button (report_ready 时显示)
+          └── Input Area: [textarea] [Send/Stop]
 ```
 
 ---
@@ -359,6 +388,20 @@ Header.tsx
 - 后端加载之前的 `agent_observations` 作为 `prior_observations`
 - Agent 不需重新收集数据（走 Fast Path: 读 `class_report.md`）
 
+### 上下文保护
+
+防止对话过长超出模型上下文窗口：
+- **消息条数限制**: 每个 conversation 最多保留 50 条消息（旧消息自动裁剪）
+- **字符数限制**: Orchestrator 发送给 LLM 时，历史裁剪至最近 10 条、总计 4000 字符以内
+- **双重保护**: 条数限制保护存储，字符限制保护 LLM 上下文
+
+### 前端会话管理
+
+- 会话列表：☰ 按钮展开历史面板，显示所有 conversation 的首条消息预览
+- 切换会话：点击历史项加载对应会话消息
+- 新建会话：[+] 按钮创建新 conversation
+- 删除会话：hover 时显示删除按钮，调用 DELETE API
+
 ---
 
 ## Model Lifecycle
@@ -411,72 +454,84 @@ Agent 执行时:
 
 ## 典型执行场景
 
-### 场景 1: 首次生成完整报告（Fast Path + 模板）
+### 场景 1: 首次生成完整报告（ReAct + 模板）
 
 ```
 用户: "帮我生成一份完整的课堂评估报告"
 
-→ Fast Path (_is_report_request = true)
-→ Plan:
-  1. intent_analysis (无 LLM)
-  2. get_class_statistics
-  3. get_class_summary
-  4. get_mindmap
-  5. get_topic_segmentation
-  6. get_teacher_transcription  ← 自动计算语速、提问次数
-  7. get_content_segmentation  ← 自动计算密度、低活跃时段
-  8. generate [LLM]            ← LLM 生成 JSON
-  9. fill_template             ← 填充 Word 模板
+→ ReAct Loop:
+  Step 1 [LLM]: "需要完整报告，先查看可用数据"
+    Action: get_session_metadata
+  Step 2 [LLM]: "需要所有数据，批量收集"
+    Actions:
+    - get_class_statistics        ← 自动计算参与度
+    - get_class_summary
+    - get_mindmap
+    - get_topic_segmentation
+    - get_teacher_transcription   ← 自动计算语速、提问次数
+    - get_content_segmentation    ← 自动计算密度、低活跃时段
+  Step 3 [LLM]: "数据收集完毕"
+    Action: generate_final_report
 
-→ 输出: class_report.docx + class_report.md
+→ 生成阶段: LLM 填充模板 → class_report.docx + class_report.md
 → 前端显示 Markdown + [Download Word Report] 按钮
 ```
 
-**LLM 调用次数**: 1 次（仅生成阶段）
+**LLM 调用次数**: 3 次（规划 × 2 + 生成 × 1）
 
-### 场景 2: 追问已有报告（Fast Path）
+### 场景 2: 追问已有报告
 
 ```
 用户: "参与度最低的时间段是哪个？"
 
-→ Fast Path (class_report.md 存在)
-→ Plan:
-  1. intent_analysis (无 LLM)
-  2. get_class_report  ← 读已有报告
-  3. generate [LLM]    ← 基于报告回答问题
+→ ReAct Loop:
+  Step 1 [LLM]: "先看有什么数据"
+    Action: get_session_metadata
+  Step 2 [LLM]: "报告已存在，读取报告；补充统计数据"
+    Actions:
+    - get_class_report
+    - get_class_statistics
+  Step 3 [LLM]: "数据足够回答"
+    Action: generate_final_report
 
-→ 输出: 对话式简短回答
+→ 输出: 对话式简短回答（基于实际数据）
 ```
 
-**LLM 调用次数**: 1 次
+**LLM 调用次数**: 3 次（规划 × 2 + 生成 × 1）
 
-### 场景 3: 具体问题（ReAct Loop）
+### 场景 3: 具体问题
 
 ```
 用户: "根据今天课程内容出5道测验题"
 
-→ ReAct Loop (非报告请求，无已有报告覆盖此需求)
-→ Plan (动态):
-  1. intent_analysis [LLM]     ← LLM 分析意图
-  2. get_class_summary          ← LLM 决定需要摘要
-  3. generate [LLM]            ← 生成测验题
+→ ReAct Loop:
+  Step 1 [LLM]: "需要课程内容来出题"
+    Action: get_session_metadata
+  Step 2 [LLM]: "需要摘要和主题分段"
+    Actions:
+    - get_class_summary
+    - get_topic_segmentation
+  Step 3 [LLM]: "内容足够出题"
+    Action: generate_final_report
 
 → 输出: 5 道选择题 (Markdown 格式)
 ```
 
-**LLM 调用次数**: 2 次（意图分析 + 生成）
+**LLM 调用次数**: 3 次（规划 × 2 + 生成 × 1）
 
 ### 场景 4: 无数据
 
 ```
 用户: "分析学生参与度"
 
-→ 所有 READ 工具返回 "NOT available"
-→ observations == []
-→ 直接返回: "当前无课堂记录数据，请先完成一节课的录制。"
-
-→ 无 LLM 调用
+→ ReAct Loop:
+  Step 1 [LLM]: Action: get_session_metadata
+  Step 2 [LLM]: Action: get_class_statistics → "NOT available"
+  → observations == []
+  → 直接返回: "当前无课堂记录数据，请先完成一节课的录制。"
 ```
+
+**LLM 调用次数**: 2 次（规划），无生成
 
 ---
 
@@ -486,18 +541,19 @@ Agent 执行时:
 smart-classroom/
 ├── main.py                              ← FastAPI 启动入口 (port 8000)
 ├── api/
-│   ├── endpoints.py                     ← HTTP endpoints
+│   ├── endpoints.py                     ← HTTP endpoints + conversation CRUD
 │   └── llm_serving.py                   ← OpenAI-compatible /v1/chat/completions
 ├── pipeline.py                          ← Pipeline factory (含 run_report)
 ├── config.yaml                          ← 应用配置
 │
 ├── components/
+│   ├── orchestrator.py                  ← Orchestrator 编排层 (会话管理 + 意图分发)
 │   ├── intent_router.py                 ← Intent Router (keyword/llm 模式)
 │   └── report_agent/                    ← 学情Agent
 │       ├── report_agent.py              ← ReAct loop + Fast Path + 流式生成
 │       ├── tools.py                     ← 18 工具 + 统计计算 + AgentMemory
 │       ├── prompts.py                   ← Prompt 模板 (ReAct/Report/Chat)
-│       ├── conversation.py              ← 多轮对话状态管理
+│       ├── conversation.py              ← 多轮对话状态管理 (MAX_MESSAGES=50)
 │       └── skills/                      ← 6 个分析技能
 │           ├── __init__.py              ← SKILL_REGISTRY
 │           ├── base_skill.py            ← BaseSkill ABC
@@ -519,8 +575,8 @@ smart-classroom/
 ├── ui/src/
 │   ├── components/
 │   │   ├── Header/Header.tsx            ← 含 🤖 Agent 按钮
-│   │   └── AgentChatDialog.tsx          ← 浮动对话框 (PlanBlock + Chat)
-│   ├── services/api.ts                  ← streamAgentChat() + PlanStep 接口
+│   │   └── AgentChatDialog.tsx          ← 浮动对话框 (PlanBlock + Chat + History)
+│   ├── services/api.ts                  ← streamAgentChat() + conversation API
 │   ├── assets/css/AgentChat.css         ← Agent UI 样式
 │   └── i18n/{en,zh}.json               ← 国际化 (agent.* 键)
 │
@@ -536,12 +592,15 @@ smart-classroom/
 
 | Endpoint | Method | 说明 | 调用方 |
 |----------|--------|------|--------|
-| `/chat` | POST | **统一入口** (含 Intent Router) | Frontend UI |
-| `/agent/chat` | POST | 学情Agent 多轮对话 | OpenClaw / Router |
+| `/chat` | POST | **统一入口** → Orchestrator 编排 | Frontend UI |
+| `/agent/chat` | POST | 学情Agent 直接入口 (跳过编排) | OpenClaw |
 | `/generate-report` | POST | 单次报告生成 | Frontend / OpenClaw |
 | `/report/{session_id}` | GET | 获取已保存报告 (Markdown) | Frontend |
 | `/report/{session_id}/download` | GET | 下载 Word 报告 | Frontend |
 | `/report/template/upload` | POST | 上传自定义 .docx 模板 | Frontend |
+| `/conversations/{session_id}` | GET | 获取会话列表 | Frontend |
+| `/conversations/{session_id}/{id}` | GET | 获取会话消息 | Frontend |
+| `/conversations/{session_id}/{id}` | DELETE | 删除会话 | Frontend |
 | `/v1/chat/completions` | POST | OpenAI 兼容 LLM 接口 | OpenClaw (本地 Provider) |
 
 ### `/agent/chat` Request
@@ -567,40 +626,55 @@ smart-classroom/
 
 ---
 
-## Intent Router（意图分析层）
+## Orchestrator（编排层）
 
-意图分析层是所有用户请求的第一道关卡。它决定：
-1. 是否需要调用 Agent（学情/作业/备课）
-2. 还是直接在该层用模型回答（通用问答/闲聊）
+Orchestrator 是所有用户请求的入口编排层（替代 OpenClaw 的本地方案）。
 
-**设计原则**：Agent 只处理领域任务，不处理通用对话。无关问题在意图层直接响应，不下发到 Agent。
+职责：
+1. 管理对话上下文（创建/复用 conversation_id）
+2. 意图分类（通过 IntentRouter）
+3. 分发到对应 Agent 或直接回答
+4. 对话历史裁剪（防止超出模型上下文）
+
+**设计原则**：Agent 只处理领域任务，不处理通用对话。无关问题由编排层直接响应。
 
 ```
 POST /chat {message: "..."}
       │
       ▼
 ┌─────────────────────────────────────────────────────┐
-│  IntentRouter.route(message)                         │
-│  ├── mode=keyword → 正则匹配 (0ms)                  │
-│  └── mode=llm → 7B 分类 (~2s)                       │
+│  Orchestrator.handle_chat(request)                   │
 │                                                      │
-│  Result: {agent, output_format, confidence}          │
-│  │                                                   │
-│  ├── agent="report"      → Report Agent (学情)       │
-│  ├── agent="homework"    → Homework Agent (作业)     │
-│  ├── agent="lesson_prep" → Lesson Prep Agent (备课)  │
-│  └── agent="general"     → 意图层直接调用模型回答     │
-│                            （不进入任何 Agent）        │
+│  1. 解析 session_id                                  │
+│  2. 管理 conversation (创建/复用)                    │
+│  3. 记录用户消息                                     │
+│  4. IntentRouter.route(message) → 意图分类           │
+│  5. 分发到已注册的 handler:                          │
+│     ├── "general"     → 直接调 LLM 回答              │
+│     ├── "report"      → Report Agent (学情)          │
+│     ├── "homework"    → Homework Agent (作业)        │
+│     └── "lesson_prep" → Lesson Prep Agent (备课)     │
+│                                                      │
+│  添加新 Agent:                                       │
+│    orchestrator.register_handler("name", handler_fn) │
 └─────────────────────────────────────────────────────┘
 ```
 
-### general 路由（意图层直接回答）
+### general 路由（编排层直接回答）
 
-当判定为 `general`（闲聊、问候、与课堂无关的问题），意图层直接用 LLM 生成回复：
+当判定为 `general`（闲聊、问候、与课堂无关的问题），编排层直接用 LLM 生成回复：
 - 不收集课堂数据
 - 不触发 Agent 的 ReAct/Fast Path 流程
-- Prompt 简单：system="你是一个课堂助手" + user message
+- 携带对话历史上下文（裁剪至 4000 字符以内）
 - 流式返回，和 Agent 共用同一个前端 token 渲染
+
+### 对话上下文管理
+
+编排层在 Agent 之前统一管理对话上下文：
+- 所有 Agent 共享同一个 conversation_id
+- 切换 Agent 时前几轮对话作为参考
+- 历史消息按字符数裁剪（MAX_HISTORY_CHARS=4000），防止超出模型上下文
+- 每个对话最多保留 50 条消息
 
 ---
 
@@ -700,7 +774,12 @@ class BaseSkill(ABC):
 
 ## Adding a New Agent
 
-1. **后端**: 创建 `components/{new_agent}/` + API endpoint
-2. **Intent Router**: 在 `intent_router.py` 添加关键词模式，在 `/chat` 添加路由分支
-3. **前端**: 新增对话面板或复用现有 AgentChatDialog
-4. **OpenClaw** (可选): 添加 `openclaw-skills/{agent}/SKILL.md`
+1. **创建 Agent handler** — 异步函数，签名 `async def handler(request, conversation_id, conv_manager)`
+2. **注册到 Orchestrator** — 在 `orchestrator.py` 的 `_register_default_handlers()` 或启动时调用：
+   ```python
+   from components.orchestrator import orchestrator
+   orchestrator.register_handler("homework", handle_homework)
+   ```
+3. **添加意图路由** — 在 `intent_router.py` 添加关键词模式（keyword 模式）或更新 LLM 分类 prompt（llm 模式）
+4. **前端** — 复用现有 AgentChatDialog（共享 token 流渲染、Plan 显示、会话管理）
+5. **OpenClaw** (可选) — 添加 `openclaw-skills/{agent}/SKILL.md`，对应 `/agent/chat` 直接入口

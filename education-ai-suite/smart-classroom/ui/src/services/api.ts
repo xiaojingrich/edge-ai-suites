@@ -1291,6 +1291,32 @@ export async function* streamAgentChat(
   yield { type: 'done', conversationId: detectedConversationId };
 }
 
+export interface ConversationPreview {
+  conversation_id: string;
+  created_at: string;
+  preview: string;
+  message_count: number;
+}
+
+export async function listConversations(sessionId: string): Promise<ConversationPreview[]> {
+  const res = await fetch(`${BASE_URL}/conversations/${sessionId}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.conversations || [];
+}
+
+export async function getConversationMessages(sessionId: string, conversationId: string): Promise<{role: string; content: string}[]> {
+  const res = await fetch(`${BASE_URL}/conversations/${sessionId}/${conversationId}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.messages || [];
+}
+
+export async function deleteConversation(sessionId: string, conversationId: string): Promise<boolean> {
+  const res = await fetch(`${BASE_URL}/conversations/${sessionId}/${conversationId}`, { method: 'DELETE' });
+  return res.ok;
+}
+
 /** Map a MIME type string to a short, display-friendly extension label (e.g. "DOCX"). */
 export function mimeToShortType(mimeType: string): string {
   const MIME_MAP: Record<string, string> = {

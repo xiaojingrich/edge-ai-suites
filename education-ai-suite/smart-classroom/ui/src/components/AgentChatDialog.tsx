@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useAppSelector } from '../redux/hooks';
-import { streamAgentChat, BASE_URL } from '../services/api';
-import type { PlanStep } from '../services/api';
+import { streamAgentChat, listConversations, getConversationMessages, deleteConversation, BASE_URL } from '../services/api';
+import type { PlanStep, ConversationPreview } from '../services/api';
 import { useTranslation } from 'react-i18next';
 import '../assets/css/AgentChat.css';
 
@@ -82,6 +82,8 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [activePlan, setActivePlan] = useState<PlanState | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [conversationList, setConversationList] = useState<ConversationPreview[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -157,7 +159,7 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
           setMessages(prev => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
-            if (last?.role === 'assistant' && last.plan) {
+            if (last?.role === 'assistant') {
               updated[updated.length - 1] = { ...last, content: last.content + event.token };
             } else {
               updated.push({ role: 'assistant', content: event.token, plan: currentPlan || undefined });
@@ -214,6 +216,34 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
   const handleNewConversation = () => {
     setMessages([]);
     setConversationId(null);
+    setShowHistory(false);
+  };
+
+  const handleToggleHistory = async () => {
+    if (!showHistory && sessionId) {
+      const list = await listConversations(sessionId);
+      setConversationList(list);
+    }
+    setShowHistory(!showHistory);
+  };
+
+  const handleSelectConversation = async (convId: string) => {
+    if (!sessionId) return;
+    const msgs = await getConversationMessages(sessionId, convId);
+    setMessages(msgs.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })));
+    setConversationId(convId);
+    setShowHistory(false);
+  };
+
+  const handleDeleteConversation = async (e: React.MouseEvent, convId: string) => {
+    e.stopPropagation();
+    if (!sessionId) return;
+    await deleteConversation(sessionId, convId);
+    setConversationList(prev => prev.filter(c => c.conversation_id !== convId));
+    if (conversationId === convId) {
+      setMessages([]);
+      setConversationId(null);
+    }
   };
 
   const suggestedQuestions = [
@@ -231,6 +261,14 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
         <div className="agent-dialog-header">
           <span className="agent-dialog-title">{t('agent.title', 'Class Report Agent')}</span>
           <div className="agent-dialog-header-actions">
+            <button
+              className="agent-history-btn"
+              onClick={handleToggleHistory}
+              disabled={isStreaming}
+              title={t('agent.history', 'Chat history')}
+            >
+              &#x2630;
+            </button>
             {messages.length > 0 && (
               <button
                 className="agent-new-conv-btn"
@@ -244,6 +282,35 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
             <button className="agent-dialog-close" onClick={onClose}>&times;</button>
           </div>
         </div>
+
+        {showHistory && (
+          <div className="agent-history-panel">
+            <div className="agent-history-title">{t('agent.historyTitle', 'Recent Conversations')}</div>
+            {conversationList.length === 0 ? (
+              <p className="agent-history-empty">{t('agent.noHistory', 'No previous conversations')}</p>
+            ) : (
+              <ul className="agent-history-list">
+                {conversationList.map(conv => (
+                  <li
+                    key={conv.conversation_id}
+                    className={`agent-history-item ${conv.conversation_id === conversationId ? 'active' : ''}`}
+                    onClick={() => handleSelectConversation(conv.conversation_id)}
+                  >
+                    <span className="agent-history-preview">{conv.preview || '...'}</span>
+                    <span className="agent-history-meta">{conv.message_count} msgs</span>
+                    <button
+                      className="agent-history-delete"
+                      onClick={(e) => handleDeleteConversation(e, conv.conversation_id)}
+                      title={t('agent.deleteConversation', 'Delete')}
+                    >
+                      &times;
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
         <div className="agent-chat-messages">
           {messages.length === 0 && !isStreaming && (
