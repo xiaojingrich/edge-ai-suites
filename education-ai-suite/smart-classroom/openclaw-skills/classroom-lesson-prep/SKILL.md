@@ -24,9 +24,9 @@ Use this skill when the user asks any of:
 ## How to Call
 
 ```bash
-curl -X POST http://localhost:8000/agent/route \
+curl -X POST http://localhost:8000/lesson-prep/chat \
   -H "Content-Type: application/json" \
-  -d '{"session_id": "<SESSION_ID>", "message": "<USER_QUESTION>"}'
+  -d '{"message": "<USER_QUESTION>", "output_format": "chat"}'
 ```
 
 ## Status

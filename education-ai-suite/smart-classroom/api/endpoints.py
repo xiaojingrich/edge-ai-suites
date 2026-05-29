@@ -882,7 +882,7 @@ async def ocr_extract_text_endpoint(file: UploadFile = File(...), x_session_id: 
     return ocr_extract_text(file, x_session_id)
 
 
-@router.post("/generate-report")
+@router.post("/report/generate")
 async def generate_report(request: ReportRequest):
     """
     Generate a full class evaluation report using the ReAct Agent.
@@ -912,11 +912,11 @@ async def generate_report(request: ReportRequest):
     return StreamingResponse(event_stream(), media_type="application/json")
 
 
-@router.post("/agent/chat")
-async def agent_chat(request: AgentChatRequest):
+@router.post("/report/chat")
+async def report_chat(request: AgentChatRequest):
     """
-    Multi-turn chat with the Report Agent.
-    session_id is optional — if not provided, the latest session is used.
+    Multi-turn chat with the Report Agent (学情Agent).
+    Direct entry point for OpenClaw. session_id is optional.
     """
     from components.report_agent.conversation import ConversationManager
     from utils.session_manager import get_latest_session_id
@@ -1146,6 +1146,38 @@ async def unified_chat(request: AgentChatRequest):
     """
     from components.orchestrator import orchestrator
     return await orchestrator.handle_chat(request)
+
+
+# --- Backward-compatible alias ---
+@router.post("/agent/chat")
+async def agent_chat_legacy(request: AgentChatRequest):
+    """Legacy alias for /report/chat. Kept for backward compatibility."""
+    return await report_chat(request)
+
+
+@router.post("/generate-report")
+async def generate_report_legacy(request: ReportRequest):
+    """Legacy alias for /report/generate. Kept for backward compatibility."""
+    return await generate_report(request)
+
+
+# --- Future Agent endpoints (placeholders) ---
+@router.post("/homework/chat")
+async def homework_chat(request: AgentChatRequest):
+    """Multi-turn chat with the Homework Agent (作业Agent). Future."""
+    return JSONResponse(
+        content={"error": "Homework Agent is not yet implemented."},
+        status_code=501,
+    )
+
+
+@router.post("/lesson-prep/chat")
+async def lesson_prep_chat(request: AgentChatRequest):
+    """Multi-turn chat with the Lesson Prep Agent (备课Agent). Future."""
+    return JSONResponse(
+        content={"error": "Lesson Prep Agent is not yet implemented."},
+        status_code=501,
+    )
 
 
 def register_routes(app: FastAPI):

@@ -27,7 +27,7 @@ Use this skill when the user asks any of:
 All interactions go through the multi-turn chat endpoint:
 
 ```bash
-curl -X POST http://localhost:8000/agent/chat \
+curl -X POST http://localhost:8000/report/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "<USER_QUESTION>", "output_format": "<FORMAT>"}'
 ```
@@ -46,7 +46,7 @@ You MUST set `output_format` based on user intent:
 For follow-up questions in the same conversation, include the conversation_id:
 
 ```bash
-curl -X POST http://localhost:8000/agent/chat \
+curl -X POST http://localhost:8000/report/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "<FOLLOW_UP>", "conversation_id": "<CONV_ID>", "output_format": "chat"}'
 ```
@@ -56,7 +56,7 @@ curl -X POST http://localhost:8000/agent/chat \
 If user explicitly wants just a report with no follow-up:
 
 ```bash
-curl -X POST http://localhost:8000/generate-report \
+curl -X POST http://localhost:8000/report/generate \
   -H "Content-Type: application/json" \
   -d '{"session_id": "<SESSION_ID>", "query": "<USER_QUESTION>"}'
 ```

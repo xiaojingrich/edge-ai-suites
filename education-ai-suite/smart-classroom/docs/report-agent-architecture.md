@@ -8,13 +8,13 @@
 │                                                                                 │
 │  ┌─── Provider (云端) ──────────────┐  ┌─── Provider (本地) ──────────────────┐│
 │  │  Cloud LLM (GPT-4o / Claude)     │  │  Smart Classroom /v1/chat/completions ││
-│  │  精准意图识别 + Skill 选择       │  │  复用 Qwen2.5-7B, 基本意图识别       ││
+│  │  精准意图识别 + Skill 选择       │  │  Qwen3-8B 意图识别 + Skill 选择     ││
 │  └───────────────────────────────────┘  └────────────────────────────────────┘│
 │                                                                                 │
 │  Skills (SKILL.md) — 教 LLM 调用哪个 API:                                      │
-│  ├── classroom-report     → POST /agent/chat {output_format}                    │
-│  ├── classroom-homework   → POST /homework/... (future)                         │
-│  └── classroom-lesson-prep → POST /lesson-prep/... (future)                     │
+│  ├── classroom-report     → POST /report/chat                                   │
+│  ├── classroom-homework   → POST /homework/chat (future)                        │
+│  └── classroom-lesson-prep → POST /lesson-prep/chat (future)                    │
 │                                                                                 │
 │  ⚠️  只有用户问题经过 OpenClaw，原始课堂数据不出设备                           │
 │                                                                                 │
@@ -37,19 +37,19 @@
 │                                                                                 │
 │  API Endpoints:                                                                 │
 │  ├── POST /chat              ← 统一入口 → Orchestrator                          │
-│  ├── POST /agent/chat        ← 学情Agent 直接入口 (OpenClaw 调用)               │
-│  ├── POST /generate-report   ← 学情Agent (单次报告)                             │
+│  ├── POST /report/chat       ← 学情Agent (OpenClaw / 直接调用)                  │
+│  ├── POST /report/generate   ← 学情Agent (单次报告)                             │
 │  ├── GET  /report/{id}       ← 获取已生成的报告                                │
 │  ├── GET  /report/{id}/download ← 下载 Word 格式报告                           │
 │  ├── POST /report/template/upload ← 上传自定义报告模板                          │
 │  ├── GET  /conversations/{session_id}          ← 会话列表                       │
 │  ├── GET  /conversations/{session_id}/{id}     ← 会话消息                       │
 │  ├── DELETE /conversations/{session_id}/{id}   ← 删除会话                       │
-│  ├── POST /homework/...      ← 作业Agent (future)                              │
-│  └── POST /lesson-prep/...   ← 备课Agent (future)                              │
+│  ├── POST /homework/chat     ← 作业Agent (future)                              │
+│  └── POST /lesson-prep/chat  ← 备课Agent (future)                              │
 │                                                                                 │
 │  Report Agent:                                                                  │
-│  ├── Local 7B LLM (Qwen2.5-7B-Instruct, OpenVINO)                             │
+│  ├── Local 8B LLM (Qwen3-8B, OpenVINO INT8)                                   │
 │  ├── 只读取已有数据 (ReAct) + 分析推理 + 文本生成                               │
 │  ├── 工具自动计算统计指标 (语速、提问次数、密度等)                               │
 │  ├── 支持 Word 模板报告生成 (.docx)                                             │
@@ -69,29 +69,37 @@ Report Agent 是真正的 Agent：**LLM 自主决定调用哪些工具、何时�
 ┌────────────────────────────────────────────────────────────────┐
 │                     generate_report() 入口                       │
 │                                                                  │
-│  model.acquire_model()                                           │
-│        │                                                         │
-│        ▼                                                         │
 │  ┌─────────────────────────────────────┐                        │
 │  │  ReAct Loop (LLM 自主决策)           │                        │
 │  │                                     │                        │
-│  │  Step 1: get_session_metadata       │                        │
-│  │  Step 2: LLM 决定调哪些工具         │                        │
+│  │  Step 1: get_session_metadata       │  ← 查看有哪些文件可用   │
+│  │  Step 2: LLM 决定调哪些工具         │  ← 根据文件列表选择     │
 │  │         (支持批量调用)              │                        │
 │  │  Step 3: generate_final_report      │                        │
 │  │                                     │                        │
-│  │  最多 6 步，目标 2-3 步             │                        │
+│  │  保护: 无数据时拒绝 generate         │                        │
+│  │  最多 6 步                           │                        │
 │  └───────────────┬─────────────────────┘                        │
+│                  │                                               │
+│         observations 为空?                                       │
+│         (ReAct 失败/LLM 出错/跳过工具)                           │
+│           │YES        │NO                                        │
+│           ▼           │                                          │
+│  ┌────────────────┐   │                                          │
+│  │ Workflow        │   │  ← 确定性按顺序调用所有 READ 工具       │
+│  │ Fallback       │   │     保证只要有数据就一定能拿到           │
+│  └───────┬────────┘   │                                          │
+│          └────────────┘                                          │
 │                  │                                               │
 │                  ▼                                               │
 │  ┌─────────────────────────────────────┐                        │
 │  │  Phase 2: 生成阶段                  │                        │
 │  │                                     │                        │
-│  │  有模板 → LLM 填充字段 → .docx      │                        │
-│  │  无模板 → LLM 流式输出 Markdown      │                        │
+│  │  report + 模板 → LLM 填充 → .docx   │                        │
+│  │  report + 无模板 → LLM 流式 Markdown │                        │
+│  │  chat → LLM 流式回答 (不写文件)      │                        │
 │  └─────────────────────────────────────┘                        │
-│                  │                                               │
-│  model.release_model()                                           │
+│                                                                  │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -134,9 +142,12 @@ LLM 自行判断是否需要原始数据。
 ### 健壮性保护
 
 - **最多 6 步**：防止推理发散
-- **模糊工具名匹配**：7B 模型可能 typo，自动纠正
-- **LLM 错误容错**：推理步骤中 LLM 失败则终止收集，用已有数据生成
+- **模糊工具名匹配**：模型可能 typo，自动纠正到最近的工具名
+- **空数据拦截**：模型在没有调任何数据工具时调 generate_final_report，代码层忽略并继续循环
+- **Workflow Fallback**：ReAct 结束后如果 observations 仍为空，自动降级为确定性 workflow（按顺序调所有 READ 工具）
+- **LLM 错误容错**：推理步骤中 LLM 失败（如 sampling NaN/Inf）则终止收集，触发 fallback
 - **不可用数据自动跳过**：工具返回 "NOT available" 时不计入 observations
+- **Chat 模式保护**：chat 问答不覆盖已生成的 `class_report.md`，只有 report 模式才写入报告文件
 
 ---
 
@@ -222,21 +233,22 @@ LLM 自行判断是否需要原始数据。
 ### 模板模式执行流程
 
 ```
-[工具收集数据] → [提取模板结构] → [LLM 分析数据填充字段] → [填充模板] → [保存 .docx]
-                        │                    │                      │
-            extract_template_structure    LLM 看到数据+模板         fill_template
-            返回 sections + all_fields    输出 "field: value" 格式   替换占位符
+[工具收集数据] → [读取模板原文] → [LLM 输出填充后完整文本] → [保存]
+                       │                    │                    │
+           read_template_text()       LLM 看到模板+数据      保存为 .md
+           读取 .docx 全文            自行判断哪些是占位符    下载时转 .docx
+                                      输出完整填好的文本
 ```
 
-设计原则：**工具只负责收集数据，模型自行决定如何填充模板**。
+设计原则：**模板不需要特殊占位符格式，LLM 自行判断哪些内容需要替换**。
 
-1. `extract_template_structure()` — 解析 .docx，提取 sections + placeholder 字段列表
-2. 构建 prompt — 将收集到的课堂数据 + 模板结构（字段列表和原文）一起提供给 LLM
-3. LLM 分析数据并输出 — 格式为 `field_name: 填充内容`（每行一个字段，比 JSON 更容错）
-4. `_parse_template_fill_response()` — 解析 key-value 格式响应
-5. `fill_template()` — 将字段值替换到 .docx 模板中，保留原有格式
+1. `read_template_text()` — 读取 .docx 模板的全部文本内容
+2. 构建 prompt — 将模板原文 + 收集到的课堂数据一起提供给 LLM
+3. LLM 识别模板中的占位内容（如 XXX、XX 等）并用实际数据替换
+4. LLM 流式输出填写完成的完整报告文本
+5. 保存为 `class_report.md`，下载时通过 `markdown_to_docx` 转换
 
-**灵活性**：模板字段变化时不需要修改代码，模型会根据提供的数据自行判断如何填充。
+**灵活性**：模板格式完全自由，不需要 `{field_name}` 标记，换模板不需要改代码。
 
 ### 无模板模式
 
@@ -407,20 +419,21 @@ Header.tsx
 ## Model Lifecycle
 
 ```
-同一个 Qwen2.5-7B 模型实例，acquire/release 模式管理 GPU 内存：
+Qwen3-8B (OpenVINO INT8) 作为独立服务运行 (port 8899):
 
-Pipeline 构造时不加载模型，只初始化 tokenizer。
-Agent 执行时:
-  acquire_model()  → 加载到 GPU
-  ReAct loop (0~10 次 LLM 调用)
-  Report generation (1 次 LLM 调用)
-  release_model()  → 从 GPU 卸载
+  LLM Service (llm_serving/app.py):
+    - 启动时加载模型到 GPU，常驻内存
+    - 提供 OpenAI 兼容接口: POST /v1/chat/completions
+    - model_lock 保证同一时间只处理一个请求
+    - 支持 stream/non-stream 两种模式
+
+  Agent/Summarizer 通过 HTTP 调用:
+    LLMServiceClient → POST http://127.0.0.1:8899/v1/chat/completions
 
 保护机制:
-  - audio_pipeline_lock: 防止与 ASR/Summary 并发访问 GPU
-  - Agent 启动前检测 lock 状态，如被占用返回 "请等待..."
-  - acquire/release 确保整个 Agent 执行期间模型不被反复加载/卸载
-    (避免 GPU 内存碎片化导致 "probability tensor contains inf/nan" 错误)
+  - audio_pipeline_lock: Agent 启动前检测，如 ASR/Summary 正在用 LLM 则拒绝
+  - model_lock (服务侧): 并发请求返回 429，客户端自动重试
+  - sampling 失败自动 fallback 到 greedy decoding
 ```
 
 ---
@@ -582,6 +595,11 @@ smart-classroom/
 │
 ├── dto/report_dto.py                    ← ReportRequest / AgentChatRequest DTO
 │
+├── openclaw-skills/                     ← OpenClaw Skill 定义
+│   ├── classroom-report/SKILL.md        ← 学情Agent → /report/chat
+│   ├── classroom-homework/SKILL.md      ← 作业Agent → /homework/chat
+│   └── classroom-lesson-prep/SKILL.md   ← 备课Agent → /lesson-prep/chat
+│
 └── docs/
     └── report-agent-architecture.md     ← 本文档
 ```
@@ -593,17 +611,21 @@ smart-classroom/
 | Endpoint | Method | 说明 | 调用方 |
 |----------|--------|------|--------|
 | `/chat` | POST | **统一入口** → Orchestrator 编排 | Frontend UI |
-| `/agent/chat` | POST | 学情Agent 直接入口 (跳过编排) | OpenClaw |
-| `/generate-report` | POST | 单次报告生成 | Frontend / OpenClaw |
+| `/report/chat` | POST | 学情Agent 多轮对话 | OpenClaw / Orchestrator |
+| `/report/generate` | POST | 学情Agent 单次报告 | Frontend / OpenClaw |
 | `/report/{session_id}` | GET | 获取已保存报告 (Markdown) | Frontend |
 | `/report/{session_id}/download` | GET | 下载 Word 报告 | Frontend |
 | `/report/template/upload` | POST | 上传自定义 .docx 模板 | Frontend |
+| `/homework/chat` | POST | 作业Agent 多轮对话 (future) | OpenClaw |
+| `/lesson-prep/chat` | POST | 备课Agent 多轮对话 (future) | OpenClaw |
 | `/conversations/{session_id}` | GET | 获取会话列表 | Frontend |
 | `/conversations/{session_id}/{id}` | GET | 获取会话消息 | Frontend |
 | `/conversations/{session_id}/{id}` | DELETE | 删除会话 | Frontend |
 | `/v1/chat/completions` | POST | OpenAI 兼容 LLM 接口 | OpenClaw (本地 Provider) |
+| `/agent/chat` | POST | Legacy alias → `/report/chat` | 向后兼容 |
+| `/generate-report` | POST | Legacy alias → `/report/generate` | 向后兼容 |
 
-### `/agent/chat` Request
+### `/report/chat` Request
 
 ```json
 {
@@ -614,7 +636,7 @@ smart-classroom/
 }
 ```
 
-### `/agent/chat` Response (Streaming JSON Lines)
+### `/report/chat` Response (Streaming JSON Lines)
 
 ```json
 {"type": "plan", "steps": [...], "conversation_id": "conv_xxx"}
@@ -774,12 +796,88 @@ class BaseSkill(ABC):
 
 ## Adding a New Agent
 
-1. **创建 Agent handler** — 异步函数，签名 `async def handler(request, conversation_id, conv_manager)`
-2. **注册到 Orchestrator** — 在 `orchestrator.py` 的 `_register_default_handlers()` 或启动时调用：
+1. **创建 Agent 模块** — `components/{agent_name}/` 目录，包含核心逻辑
+2. **添加独立 endpoint** — 在 `api/endpoints.py` 注册 `POST /{agent_name}/chat`
+3. **注册到 Orchestrator** — 在 `orchestrator.py` 的 `_register_default_handlers()` 中：
    ```python
-   from components.orchestrator import orchestrator
-   orchestrator.register_handler("homework", handle_homework)
+   orchestrator.register_handler("homework", self._handle_homework)
    ```
-3. **添加意图路由** — 在 `intent_router.py` 添加关键词模式（keyword 模式）或更新 LLM 分类 prompt（llm 模式）
-4. **前端** — 复用现有 AgentChatDialog（共享 token 流渲染、Plan 显示、会话管理）
-5. **OpenClaw** (可选) — 添加 `openclaw-skills/{agent}/SKILL.md`，对应 `/agent/chat` 直接入口
+4. **添加意图路由** — 在 `intent_router.py` 添加关键词模式（keyword 模式）或更新 LLM 分类 prompt（llm 模式）
+5. **前端** — 复用现有 AgentChatDialog（共享 token 流渲染、Plan 显示、会话管理）
+6. **OpenClaw** (可选) — 添加 `openclaw-skills/{agent}/SKILL.md`，指向 `POST /{agent_name}/chat`
+
+### Endpoint 路由规则
+
+```
+每个 Agent 独立 URL namespace:
+├── POST /report/chat          ← 学情Agent
+├── POST /report/generate      ← 学情Agent 单次
+├── GET  /report/{id}          ← 学情Agent 查看
+├── POST /homework/chat        ← 作业Agent
+├── POST /lesson-prep/chat     ← 备课Agent
+└── POST /chat                 ← 统一入口 (Orchestrator 自动分发)
+```
+
+---
+
+## OpenClaw 部署
+
+### 概述
+
+OpenClaw 是可选的云端编排层。部署后提供更精准的意图识别（使用 GPT-4o/Claude），不部署时由本地 Orchestrator 替代。
+
+### Skill 文件
+
+```
+openclaw-skills/
+├── classroom-report/SKILL.md       → POST /report/chat
+├── classroom-homework/SKILL.md     → POST /homework/chat
+└── classroom-lesson-prep/SKILL.md  → POST /lesson-prep/chat
+```
+
+每个 SKILL.md 告诉 OpenClaw 的 LLM：
+- 什么时候触发这个 Skill（trigger phrases）
+- 调用哪个 API endpoint
+- 如何设置 `output_format` 参数
+
+### 两种部署模式对比
+
+```
+模式 A: 有 OpenClaw (云端编排)
+┌──────────┐     ┌──────────┐     ┌────────────────────┐
+│  用户    │ ──→ │ OpenClaw │ ──→ │ Smart Classroom    │
+│          │     │ (云端)   │     │ /report/chat       │
+│          │     │          │     │ /homework/chat     │
+│          │     │ 精准意图 │     │ /lesson-prep/chat  │
+└──────────┘     └──────────┘     └────────────────────┘
+
+模式 B: 无 OpenClaw (本地编排)
+┌──────────┐     ┌────────────────────────────────────────┐
+│  用户    │ ──→ │ Smart Classroom                        │
+│          │     │ POST /chat → Orchestrator              │
+│          │     │   → IntentRouter (keyword/llm)         │
+│          │     │   → dispatch to agent handler          │
+└──────────┘     └────────────────────────────────────────┘
+```
+
+### 本地 Provider 配置
+
+OpenClaw 使用本地 Qwen3-8B 作为 Provider 时，通过 OpenAI 兼容接口：
+
+```
+POST http://<device-ip>:8899/v1/chat/completions
+```
+
+该接口由 `services/llm_serving/app.py` 提供，OpenClaw 将其配置为 Provider 后可用于意图识别和 Skill 选择。
+
+### 数据隐私
+
+即使部署 OpenClaw，**只有用户的问题文本**经过云端：
+
+| 经过 OpenClaw | 留在本地 |
+|:---:|:---:|
+| 用户问题 | 原始转录 |
+| output_format | 学生数据 |
+| session_id | 视频分析 |
+| conversation_id | 报告内容 |
+| | Word 文件 |

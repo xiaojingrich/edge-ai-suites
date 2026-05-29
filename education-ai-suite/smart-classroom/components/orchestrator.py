@@ -128,8 +128,8 @@ class Orchestrator:
 
     async def _handle_report(self, request: AgentChatRequest,
                              conversation_id: str, conv_manager: ConversationManager):
-        from api.endpoints import agent_chat
-        return await agent_chat(request)
+        from api.endpoints import report_chat
+        return await report_chat(request)
 
     # --- Utilities ---
 

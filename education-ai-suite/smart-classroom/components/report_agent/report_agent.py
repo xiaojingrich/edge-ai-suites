@@ -27,10 +27,7 @@ from utils.config_loader import config
 from utils.runtime_config_loader import RuntimeConfig
 from utils.storage_manager import StorageManager
 from utils.locks import audio_pipeline_lock
-from utils.template_manager import (
-    get_template_path,
-    fill_template,
-)
+from utils.template_manager import get_template_path
 
 logger = logging.getLogger(__name__)
 
@@ -164,73 +161,76 @@ class ReportAgent(PipelineComponent):
         )
 
     def _build_template_fill_prompt(self, template_path: str) -> str:
-        """Build a concise prompt for LLM to fill template fields.
+        """Build prompt for LLM to output replacement pairs for the template.
 
-        Provides collected data and template structure to the model.
-        The model decides how to map data to fields — no rigid format required.
-        Output: one line per field as "field_name: content".
+        LLM sees the template text + collected data, outputs lines of
+        "原文 → 替换后" for each placeholder that should be filled.
+        Code then applies these replacements on a copy of the .docx.
         """
-        from utils.template_manager import extract_template_structure
+        from utils.template_manager import read_template_text
 
-        template_structure = extract_template_structure(template_path)
-        fields = template_structure["all_fields"]
-        raw_text = template_structure["raw_text"]
+        template_text = read_template_text(template_path)
         observations_text = "\n\n".join(self.observations)
 
         project_config = RuntimeConfig.get_section("Project")
         import time as _time
         meta_info = (
-            f"school_name: {project_config.get('school_name', '')}\n"
-            f"class_name: {project_config.get('class_name', '')}\n"
-            f"course_name: {project_config.get('course_name', '')}\n"
-            f"teacher_name: {project_config.get('teacher_name', '')}\n"
-            f"report_time: {_time.strftime('%Y-%m-%d %H:%M')}\n"
+            f"学校班级: {project_config.get('school_name', '')} {project_config.get('class_name', '')}\n"
+            f"课程名称: {project_config.get('course_name', '')}\n"
+            f"授课教师: {project_config.get('teacher_name', '')}\n"
+            f"报告时间: {_time.strftime('%Y年%m月%d日 %H:%M')}\n"
         )
 
         if self.language == "zh":
-            user_content = f"""根据收集到的课堂数据，填写报告模板中的每个字段。
+            user_content = f"""下面是一份课堂报告模板和收集到的课堂数据。请找出模板中需要用实际数据替换的占位内容（如 XXX、XX 等），输出替换映射。
 
 ## 基本信息
 {meta_info}
 
-## 报告模板（字段用{{}}标记）：
-{raw_text}
+## 报告模板原文：
+{template_text}
 
 ## 收集到的课堂数据：
 {observations_text}
 
-## 输出要求：
-逐行输出每个字段的内容，格式为 "字段名: 填充内容"。
-- 重要：字段值会直接替换模板中的 {{字段名}}。注意观察模板中字段前后是否已有单位：如果有（如"教师提问 {{question_count}} 次"），则只填纯数值"14"；如果没有（如"时长：{{duration}}"），则需要带上单位"5.0 分钟"
-- 数值直接从数据中提取
-- 分析评估类字段根据数据综合判断
-- 数据不可用的字段填"暂无数据"
+## 输出格式：
+每行一条替换，格式为"原文内容 → 替换后内容"。只输出需要替换的部分，例如：
+XXX中学八(3)班 → 实验中学八(3)班
+教师提问 XXX 次 → 教师提问 14 次
+实到 XX 人 → 实到 7 人
+平均语速 XXX 字/分 → 平均语速 218 字/分
 
-需要填写的字段：{', '.join(fields)}"""
+## 要求：
+- 每行一条替换映射，用 → 分隔
+- 原文必须和模板中完全一致（代码需要精确匹配来替换）
+- 数据中没有的字段不要输出
+- 不要输出任何解释"""
         else:
-            user_content = f"""Based on collected classroom data, fill in each field of the report template.
+            user_content = f"""Below is a classroom report template and collected classroom data. Find the placeholders (XXX, XX, etc.) in the template that should be replaced with actual data, and output the replacement mapping.
 
 ## Basic Info
 {meta_info}
 
-## Report template (fields marked with {{}}):
-{raw_text}
+## Report template:
+{template_text}
 
 ## Collected classroom data:
 {observations_text}
 
-## Output requirements:
-Output one field per line as "field_name: content".
-- Important: field values directly replace {{field_name}} in the template. Check if the template already has units around the field: if yes (e.g., "asked {{question_count}} questions"), output only the number "14"; if no (e.g., "Duration: {{duration}}"), include the unit "5.0 minutes"
-- Extract numeric values directly from data
-- Provide analytical assessments based on data
-- Use "Data not available" for unavailable fields
+## Output format:
+One replacement per line as "original text → replacement text". Only output parts that need replacing, e.g.:
+Teacher questions XXX times → Teacher questions 14 times
+Students present: XX → Students present: 7
 
-Fields to fill: {', '.join(fields)}"""
+## Requirements:
+- One replacement mapping per line, separated by →
+- Original text must exactly match what's in the template
+- Do not output fields where data is unavailable
+- Do not output any explanations"""
 
-        system_msg = ("你是课堂评估报告填写助手。根据数据填充模板字段，简洁准确。"
+        system_msg = ("你是课堂评估报告助手。找出模板中的占位内容并输出替换映射。"
                       if self.language == "zh"
-                      else "You are a classroom report assistant. Fill template fields based on data. Be concise and accurate.")
+                      else "You are a classroom report assistant. Identify placeholders and output replacement mappings.")
 
         messages = [
             {"role": "system", "content": system_msg},
@@ -239,23 +239,6 @@ Fields to fill: {', '.join(fields)}"""
         return self.model.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
         )
-
-    def _parse_template_fill_response(self, response: str) -> dict:
-        """Parse LLM response in 'field_name: value' format into a dict.
-
-        More tolerant than JSON parsing — handles variations in formatting.
-        """
-        field_values = {}
-        for line in response.strip().split("\n"):
-            line = line.strip()
-            if not line or ":" not in line:
-                continue
-            key, _, value = line.partition(":")
-            key = key.strip().strip("*").strip()
-            value = value.strip()
-            if key and value:
-                field_values[key] = value
-        return field_values
 
     def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
         """Parse LLM output to extract one or more Action calls.
@@ -328,7 +311,7 @@ Fields to fill: {', '.join(fields)}"""
         ]
 
         plan_steps = [{"action": t[0], "thought": t[1], "llm": False} for t in read_tools]
-        plan_steps.append({"action": "generate", "thought": "生成报告" if self.language == "zh" else "Generate report", "llm": True})
+        plan_steps.append({"action": "generate", "thought": "生成回复" if self.language == "zh" else "Generate response", "llm": True})
         yield {"type": "plan", "steps": plan_steps}
 
         for i, (tool_name, _) in enumerate(read_tools):
@@ -350,7 +333,8 @@ Fields to fill: {', '.join(fields)}"""
         ]
         step_index = 0
 
-        yield {"type": "plan", "steps": plan_steps + [{"action": "generate", "thought": "生成回复" if self.language == "zh" else "Generate response", "llm": True}]}
+        generate_label = "生成回复" if self.language == "zh" else "Generate response"
+        yield {"type": "plan", "steps": plan_steps + [{"action": "generate", "thought": generate_label, "llm": True}]}
         yield {"type": "step_start", "index": 0}
 
         for step in range(MAX_REACT_STEPS):
@@ -402,7 +386,7 @@ Fields to fill: {', '.join(fields)}"""
                 new_step = {"action": action, "thought": thought_text, "llm": step > 0}
                 plan_steps.append(new_step)
 
-                full_plan = plan_steps + [{"action": "generate", "thought": "基于数据生成报告" if self.language == "zh" else "Generate report from data", "llm": True}]
+                full_plan = plan_steps + [{"action": "generate", "thought": generate_label, "llm": True}]
                 yield {"type": "plan_update", "steps": full_plan}
 
                 yield {"type": "step_start", "index": step_index}
@@ -444,14 +428,11 @@ Fields to fill: {', '.join(fields)}"""
         """
         Main entry point: run the ReAct loop to collect data,
         then generate the final report via streaming LLM call.
-
-        The model is held in memory for the entire duration (ReAct + report gen)
-        to avoid repeated load/unload cycles on edge devices.
         """
         if self.model is None:
             raise RuntimeError("ReportAgent requires a model instance.")
 
-        # Check if audio pipeline is using the model — avoid blocking it
+        # LLM service handles one request at a time; avoid queueing behind ASR
         if audio_pipeline_lock.locked():
             busy_msg = ("当前音频处理正在进行中，请等待转录/摘要完成后再使用学情Agent。"
                         if self.language == "zh"
@@ -462,175 +443,155 @@ Fields to fill: {', '.join(fields)}"""
 
         start = time.perf_counter()
 
-        # Hold model in memory for the entire agent execution
-        self.model.acquire_model()
-        logger.info("[ReportAgent] Model acquired — will hold until report generation completes.")
+        # Phase 1: Data collection — LLM decides which tools to call
+        logger.info("[ReportAgent] Starting ReAct loop — LLM-guided tool selection")
+        for event in self._run_react_loop():
+            yield event
 
-        try:
-            # Phase 1: Data collection — LLM decides which tools to call
-            logger.info("[ReportAgent] Starting ReAct loop — LLM-guided tool selection")
-            for event in self._run_react_loop():
+        # Fallback: if ReAct failed to collect any data, try workflow mode
+        if not self.observations:
+            logger.warning("[ReportAgent] ReAct collected nothing — trying workflow fallback")
+            for event in self._run_workflow_fallback():
                 yield event
 
-            # Fallback: if ReAct failed to collect any data, try workflow mode
-            if not self.observations:
-                logger.warning("[ReportAgent] ReAct collected nothing — trying workflow fallback")
-                for event in self._run_workflow_fallback():
-                    yield event
+        react_time = time.perf_counter() - start
+        logger.info(f"[ReportAgent] Data collection phase completed in {react_time:.2f}s")
 
-            react_time = time.perf_counter() - start
-            logger.info(f"[ReportAgent] Data collection phase completed in {react_time:.2f}s")
+        # Early exit: if still no observations, no classroom data exists
+        if not self.observations:
+            no_data_msg = "当前无课堂记录数据，请先完成一节课的录制。" if self.language == "zh" else "No classroom recording data available. Please complete a class session first."
+            logger.warning(f"[ReportAgent] No data found for session {self.session_id}")
+            yield {"type": "token", "content": no_data_msg}
+            return
 
-            # Early exit: if still no observations, no classroom data exists
-            if not self.observations:
-                no_data_msg = "当前无课堂记录数据，请先完成一节课的录制。" if self.language == "zh" else "No classroom recording data available. Please complete a class session first."
-                logger.warning(f"[ReportAgent] No data found for session {self.session_id}")
-                yield {"type": "token", "content": no_data_msg}
-                return
+        # Phase 2: Generate response
+        if self.output_format_hint == "report":
+            is_report = True
+            logger.info("[ReportAgent] Intent: structured report (from orchestration hint)")
+        elif self.output_format_hint == "chat":
+            is_report = False
+            logger.info("[ReportAgent] Intent: conversational response (from orchestration hint)")
+        else:
+            is_report = self._is_report_request()
+            logger.info(f"[ReportAgent] Intent: {'report' if is_report else 'chat'} (local keyword detection)")
 
-            # Phase 2: Generate response
-            if self.output_format_hint == "report":
-                is_report = True
-                logger.info("[ReportAgent] Intent: structured report (from orchestration hint)")
-            elif self.output_format_hint == "chat":
-                is_report = False
-                logger.info("[ReportAgent] Intent: conversational response (from orchestration hint)")
-            else:
-                is_report = self._is_report_request()
-                logger.info(f"[ReportAgent] Intent: {'report' if is_report else 'chat'} (local keyword detection)")
+        session_dir = self._get_session_dir()
+        report_path = os.path.join(session_dir, "class_report.md")
+        trajectory_path = os.path.join(session_dir, "report_agent_trajectory.json")
 
-            session_dir = self._get_session_dir()
-            report_path = os.path.join(session_dir, "class_report.md")
-            trajectory_path = os.path.join(session_dir, "report_agent_trajectory.json")
+        # Save the reasoning trajectory for transparency
+        StorageManager.save(
+            trajectory_path,
+            json.dumps({
+                "session_id": self.session_id,
+                "user_query": self.user_query,
+                "steps": len(self.trajectory),
+                "observations_count": len(self.observations),
+                "trajectory": self.trajectory,
+                "observations": self.observations,
+            }, ensure_ascii=False, indent=2),
+            append=False,
+        )
 
-            # Save the reasoning trajectory for transparency
-            StorageManager.save(
-                trajectory_path,
-                json.dumps({
-                    "session_id": self.session_id,
-                    "user_query": self.user_query,
-                    "steps": len(self.trajectory),
-                    "observations_count": len(self.observations),
-                    "trajectory": self.trajectory,
-                    "observations": self.observations,
-                }, ensure_ascii=False, indent=2),
-                append=False,
-            )
+        # Check if template-based report generation should be used
+        template_path = get_template_path(self.language, self.session_id) if is_report else None
+        use_template = is_report and template_path is not None
 
-            # Check if template-based report generation should be used
-            template_path = get_template_path(self.language, self.session_id) if is_report else None
-            use_template = is_report and template_path is not None
+        if use_template:
+            output_prompt = self._build_template_fill_prompt(template_path)
+            logger.info(f"[ReportAgent] Template mode: LLM fills template from collected data")
+        elif is_report:
+            output_prompt = self._build_report_prompt()
+        else:
+            output_prompt = self._build_chat_prompt()
 
-            if use_template:
-                output_prompt = self._build_template_fill_prompt(template_path)
-                logger.info(f"[ReportAgent] Template mode: LLM fills template from collected data")
-            elif is_report:
-                output_prompt = self._build_report_prompt()
-            else:
-                output_prompt = self._build_chat_prompt()
+        first_token_time = None
 
-            first_token_time = None
+        if use_template:
+            # Template mode: LLM outputs replacement pairs, apply on .docx copy
+            from utils.template_manager import parse_replacements_from_llm, fill_template_from_text
+
+            yield {"type": "step_start", "index": -1}
+            logger.info(f"[ReportAgent] Template mode: LLM generating replacements for {template_path}")
 
             try:
-                if use_template:
-                    # Template mode: LLM reads collected data + template structure,
-                    # outputs field values in "key: value" format (no strict JSON needed)
-                    yield {"type": "step_start", "index": -2}
-                    logger.info(f"[ReportAgent] Template mode: LLM filling fields for {template_path}")
-                    try:
-                        llm_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
-                    except RuntimeError as e:
-                        logger.error(f"[ReportAgent] LLM call failed during template fill: {e}")
-                        err_msg = (
-                            "报告生成失败：LLM服务超时或出错，请稍后重试。"
-                            if self.language == "zh"
-                            else "Report generation failed: LLM service timed out or returned an error. Please try again."
-                        )
-                        yield {"type": "token", "content": err_msg}
-                        yield {"type": "step_done", "index": -2}
-                        return
+                llm_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
+            except RuntimeError as e:
+                logger.error(f"[ReportAgent] LLM failed during template fill: {e}")
+                err_msg = ("报告生成失败：LLM服务超时或出错，请稍后重试。"
+                           if self.language == "zh"
+                           else "Report generation failed. Please try again.")
+                yield {"type": "token", "content": err_msg}
+                yield {"type": "step_done", "index": -1}
+                return
+
+            first_token_time = time.perf_counter()
+            replacements = parse_replacements_from_llm(llm_response)
+            logger.info(f"[ReportAgent] LLM returned {len(replacements)} replacements")
+
+            docx_path = os.path.join(session_dir, "class_report.docx")
+            fill_template_from_text(template_path, replacements, docx_path)
+
+            # Save a readable summary for chat display
+            summary_lines = []
+            for original, replacement in replacements.items():
+                summary_lines.append(f"- {original} → {replacement}")
+            summary_text = "\n".join(summary_lines) if summary_lines else llm_response
+            StorageManager.save(report_path, summary_text, append=False)
+
+            for token in summary_text:
+                yield {"type": "token", "content": token}
+
+            yield {"type": "step_done", "index": -1}
+            yield {"type": "report_ready", "session_id": self.session_id}
+
+        elif is_report:
+            # Report mode (no template): stream markdown and save to file
+            StorageManager.save(report_path, "", append=False)
+            yield {"type": "step_start", "index": -1}
+            streamer = self.model.generate(output_prompt, stream=True)
+            for token in streamer:
+                if first_token_time is None:
                     first_token_time = time.perf_counter()
-                    field_values = self._parse_template_fill_response(llm_response)
-                    logger.info(f"[ReportAgent] LLM returned {len(field_values)} fields")
-                    yield {"type": "step_done", "index": -2}
 
-                    # Fill template step
-                    yield {"type": "step_start", "index": -1}
-                    docx_path = os.path.join(session_dir, "class_report.docx")
-                    fill_template(template_path, field_values, docx_path)
+                StorageManager.save_async(report_path, token, append=True)
+                yield {"type": "token", "content": token}
 
-                    # Also save a readable markdown summary for chat display
-                    summary_lines = []
-                    if self.language == "zh":
-                        summary_lines.append("# 课后总结报告\n")
-                    else:
-                        summary_lines.append("# Post-Class Summary Report\n")
+            yield {"type": "step_done", "index": -1}
 
-                    for key, value in field_values.items():
-                        if value and value not in ("暂无数据", "Data not available"):
-                            summary_lines.append(f"**{key}**: {value}\n")
+        else:
+            # Chat mode: stream response without overwriting report file
+            yield {"type": "step_start", "index": -1}
+            streamer = self.model.generate(output_prompt, stream=True)
+            for token in streamer:
+                if first_token_time is None:
+                    first_token_time = time.perf_counter()
 
-                    markdown_summary = "\n".join(summary_lines)
-                    StorageManager.save(report_path, markdown_summary, append=False)
+                yield {"type": "token", "content": token}
 
-                    # Stream the summary to chat
-                    for token in markdown_summary:
-                        yield {"type": "token", "content": token}
+            yield {"type": "step_done", "index": -1}
 
-                    yield {"type": "step_done", "index": -1}
-                    yield {"type": "report_ready", "session_id": self.session_id}
+        # Performance metrics
+        end = time.perf_counter()
+        total_time = end - start
+        report_gen_time = end - start - react_time
+        ttft = (first_token_time - start - react_time) if first_token_time else -1
 
-                elif is_report:
-                    # Report mode (no template): stream markdown and save to file
-                    StorageManager.save(report_path, "", append=False)
-                    yield {"type": "step_start", "index": -1}
-                    streamer = self.model.generate(output_prompt, stream=True)
-                    for token in streamer:
-                        if first_token_time is None:
-                            first_token_time = time.perf_counter()
+        logger.info(
+            f"[ReportAgent] Complete. Total: {total_time:.2f}s "
+            f"(ReAct: {react_time:.2f}s, Report Gen: {report_gen_time:.2f}s, TTFT: {ttft:.2f}s)"
+        )
 
-                        StorageManager.save_async(report_path, token, append=True)
-                        yield {"type": "token", "content": token}
-
-                    yield {"type": "step_done", "index": -1}
-
-                else:
-                    # Chat mode: stream response without overwriting report file
-                    yield {"type": "step_start", "index": -1}
-                    streamer = self.model.generate(output_prompt, stream=True)
-                    for token in streamer:
-                        if first_token_time is None:
-                            first_token_time = time.perf_counter()
-
-                        yield {"type": "token", "content": token}
-
-                    yield {"type": "step_done", "index": -1}
-
-            finally:
-                end = time.perf_counter()
-                total_time = end - start
-                report_gen_time = end - start - react_time
-                ttft = (first_token_time - start - react_time) if first_token_time else -1
-
-                logger.info(
-                    f"[ReportAgent] Complete. Total: {total_time:.2f}s "
-                    f"(ReAct: {react_time:.2f}s, Report Gen: {report_gen_time:.2f}s, TTFT: {ttft:.2f}s)"
-                )
-
-                StorageManager.update_csv(
-                    path=os.path.join(session_dir, "performance_metrics.csv"),
-                    new_data={
-                        "performance.report_react_steps": len(self.trajectory),
-                        "performance.report_react_time": round(react_time, 4),
-                        "performance.report_generation_time": round(report_gen_time, 4),
-                        "performance.report_total_time": round(total_time, 4),
-                        "performance.report_ttft": f"{round(ttft, 4)}s",
-                    },
-                )
-
-        finally:
-            self.model.release_model()
-            logger.info("[ReportAgent] Model released.")
+        StorageManager.update_csv(
+            path=os.path.join(session_dir, "performance_metrics.csv"),
+            new_data={
+                "performance.report_react_steps": len(self.trajectory),
+                "performance.report_react_time": round(react_time, 4),
+                "performance.report_generation_time": round(report_gen_time, 4),
+                "performance.report_total_time": round(total_time, 4),
+                "performance.report_ttft": f"{round(ttft, 4)}s",
+            },
+        )
 
     def process(self, _):
         """PipelineComponent interface."""
