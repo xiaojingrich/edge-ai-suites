@@ -826,20 +826,6 @@ class BaseSkill(ABC):
 
 OpenClaw 是可选的云端编排层。部署后提供更精准的意图识别（使用 GPT-4o/Claude），不部署时由本地 Orchestrator 替代。
 
-### Skill 文件
-
-```
-openclaw-skills/
-├── classroom-report/SKILL.md       → POST /report/chat
-├── classroom-homework/SKILL.md     → POST /homework/chat
-└── classroom-lesson-prep/SKILL.md  → POST /lesson-prep/chat
-```
-
-每个 SKILL.md 告诉 OpenClaw 的 LLM：
-- 什么时候触发这个 Skill（trigger phrases）
-- 调用哪个 API endpoint
-- 如何设置 `output_format` 参数
-
 ### 两种部署模式对比
 
 ```
@@ -860,15 +846,133 @@ openclaw-skills/
 └──────────┘     └────────────────────────────────────────┘
 ```
 
-### 本地 Provider 配置
+### Prerequisites
 
-OpenClaw 使用本地 Qwen3-8B 作为 Provider 时，通过 OpenAI 兼容接口：
+- Node.js 22.19+ 或 Node 24
+- 至少一个 LLM Provider（云端 API key 或 Smart Classroom 本地 Qwen3-8B）
+- Smart Classroom 服务已启动（`localhost:8000`，LLM service on `:8899`）
 
+### Step 1: 安装 OpenClaw
+
+```bash
+npm install -g openclaw@latest
+openclaw onboard --install-daemon
 ```
-POST http://<device-ip>:8899/v1/chat/completions
+
+### Step 2: 配置 Provider 和 Agent
+
+编辑 `~/.openclaw/.env`:
+```bash
+OPENAI_API_KEY=sk-...   # 云端时用 (纯本地时可不配)
 ```
 
-该接口由 `services/llm_serving/app.py` 提供，OpenClaw 将其配置为 Provider 后可用于意图识别和 Skill 选择。
+编辑 `~/.openclaw/openclaw.json`:
+```json
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "your-secret-token"
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "openai": {},
+      "smart-classroom": {
+        "baseUrl": "http://127.0.0.1:8899",
+        "apiKey": "local",
+        "api": "openai-completions",
+        "models": []
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/gpt-4o",
+        "fallbacks": ["smart-classroom/Qwen3-8B"]
+      },
+      "skipBootstrap": true
+    },
+    "list": [
+      {
+        "id": "classroom",
+        "default": true,
+        "workspace": "~/.openclaw/workspace-classroom",
+        "model": {
+          "primary": "openai/gpt-4o",
+          "fallbacks": ["smart-classroom/Qwen3-8B"]
+        },
+        "identity": {
+          "name": "学情助手",
+          "theme": "classroom analysis assistant",
+          "emoji": "📊"
+        },
+        "tools": {
+          "allow": ["web_fetch", "session_status"]
+        }
+      }
+    ]
+  }
+}
+```
+
+> **注意**: 本地 fallback 直接使用 Smart Classroom 的 LLM service (`localhost:8899/v1/chat/completions`)，
+> 复用已加载的 Qwen3-8B 模型，无需额外模型服务。
+
+### Step 3: 添加 Skills
+
+```bash
+mkdir -p ~/.openclaw/workspace-classroom/skills
+cp -r /path/to/smart-classroom/openclaw-skills/* ~/.openclaw/workspace-classroom/skills/
+```
+
+目录结构:
+```
+~/.openclaw/
+├── .env                           ← API keys
+├── openclaw.json                  ← Agent + Provider 配置
+└── workspace-classroom/
+    └── skills/
+        ├── classroom-report/SKILL.md      ← 学情Agent → /report/chat
+        ├── classroom-homework/SKILL.md    ← 作业Agent → /homework/chat (future)
+        └── classroom-lesson-prep/SKILL.md ← 备课Agent → /lesson-prep/chat (future)
+```
+
+### Step 4: 启动
+
+```bash
+# 启动 Smart Classroom (LLM service + 主服务)
+cd /path/to/smart-classroom
+python main.py  # localhost:8000, LLM service on :8899
+
+# 启动 OpenClaw
+openclaw gateway start
+openclaw gateway status
+openclaw skills list  # 验证 skills 加载
+```
+
+### Step 5: 验证
+
+```bash
+# Smart Classroom 健康检查
+curl http://localhost:8000/health
+
+# LLM Service 健康检查
+curl http://localhost:8899/health
+
+# 通过 OpenClaw 对话测试
+openclaw chat "帮我分析今天课堂的学生参与度"
+# 预期: OpenClaw 识别意图 → 选择 classroom-report skill → 调用 /report/chat
+
+# 直接调用测试 (绕过 OpenClaw)
+curl -X POST http://localhost:8000/report/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "学生参与度怎么样", "output_format": "chat"}'
+```
 
 ### 数据隐私
 
