@@ -173,8 +173,9 @@ Available agents:
 {agent_descriptions}
 
 Special rule for "report" agent:
-- Output "report_full" when user wants to GENERATE/CREATE/REGENERATE a report (e.g., "生成报告", "重新生成报告", "generate a report", "generate a full report", "create report")
-- Output "report" when user asks a QUESTION about class data (e.g., "参与度怎么样", "哪个时段最低", "根据报告分析xxx", "analyze engagement")
+- Output "report_full" ONLY when the user's PRIMARY intent is to produce/create a new report document (e.g., "生成报告", "重新生成报告", "generate a report", "帮我出一份报告")
+- Output "report" when user asks a question or requests analysis (e.g., "根据报告分析xxx", "参与度怎么样", "知识掌握情况如何", "哪些需要加强", "analyze engagement")
+- Key distinction: "生成/创建/出一份 + 报告" = report_full; "分析/看看/怎么样" = report
 
 Valid outputs: [{', '.join(agent_names)}, report_full]"""
 
