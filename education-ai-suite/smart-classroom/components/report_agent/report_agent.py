@@ -82,6 +82,14 @@ class ReportAgent(PipelineComponent):
             )
 
         user_content = f"Session ID: {self.session_id}"
+
+        if not history and self.observations:
+            prior_summary = "\n".join(f"- {obs.split(']')[0]}]" for obs in self.observations)
+            if self.language == "zh":
+                user_content += f"\n\n之前对话已收集到以下数据（无需重新获取，除非你认为需要更新）：\n{prior_summary}"
+            else:
+                user_content += f"\n\nData already collected from previous turns (no need to re-fetch unless you think it needs updating):\n{prior_summary}"
+
         if history:
             user_content += f"\n\nPrevious steps:\n{history}"
 
@@ -182,7 +190,11 @@ class ReportAgent(PipelineComponent):
         )
 
         if self.language == "zh":
-            user_content = f"""下面是一份课堂报告模板和收集到的课堂数据。请找出模板中需要用实际数据替换的占位内容（如 XXX、XX 等），输出替换映射。
+            user_content = f"""下面是一份课堂报告模板和收集到的课堂数据。请找出模板中需要替换的占位内容，输出替换映射。
+
+占位内容可能是以下格式之一：
+- XXX、XXXX、XX（用X表示的占位）
+- {{placeholder_name}}（花括号变量名）
 
 ## 基本信息
 {meta_info}
@@ -194,19 +206,28 @@ class ReportAgent(PipelineComponent):
 {observations_text}
 
 ## 输出格式：
-每行一条替换，格式为"原文内容 → 替换后内容"。只输出需要替换的部分，例如：
-XXX中学八(3)班 → 实验中学八(3)班
+每行一条替换，用 → 分隔。左侧是模板中的【完整原文片段】，右侧是替换后的内容。
+注意：左侧必须包含占位符周围的上下文文字（如"教师提问 XXX 次"），让代码能精确定位。
+
+示例：
+XXX 中学八（3）班 → 实验中学八（3）班
 教师提问 XXX 次 → 教师提问 14 次
-实到 XX 人 → 实到 7 人
+讲授时长 XXX → 讲授时长 38分钟
 平均语速 XXX 字/分 → 平均语速 218 字/分
+实到 XX 人 → 实到 48 人
+主动举手 XX 人次 → 主动举手 96 人次
 
 ## 要求：
 - 每行一条替换映射，用 → 分隔
-- 原文必须和模板中完全一致（代码需要精确匹配来替换）
+- 左侧必须和模板原文完全一致（代码用字符串精确匹配来替换）
 - 数据中没有的字段不要输出
 - 不要输出任何解释"""
         else:
-            user_content = f"""Below is a classroom report template and collected classroom data. Find the placeholders (XXX, XX, etc.) in the template that should be replaced with actual data, and output the replacement mapping.
+            user_content = f"""Below is a classroom report template and collected classroom data. Find placeholders in the template and output replacement mappings.
+
+Placeholders may be in these formats:
+- XXX, XXXX, XX (X-based placeholders)
+- {{placeholder_name}} (curly brace variables)
 
 ## Basic Info
 {meta_info}
@@ -218,13 +239,17 @@ XXX中学八(3)班 → 实验中学八(3)班
 {observations_text}
 
 ## Output format:
-One replacement per line as "original text → replacement text". Only output parts that need replacing, e.g.:
+One replacement per line, separated by →. Left side is the EXACT text fragment from the template, right side is the replacement.
+Note: Left side must include surrounding context (e.g., "Teacher questions XXX times") so the code can locate it precisely.
+
+Examples:
 Teacher questions XXX times → Teacher questions 14 times
-Students present: XX → Students present: 7
+Students present: XX → Students present: 48
+Speaking speed XXX chars/min → Speaking speed 218 chars/min
 
 ## Requirements:
 - One replacement mapping per line, separated by →
-- Original text must exactly match what's in the template
+- Left side must exactly match the template text (code uses exact string matching)
 - Do not output fields where data is unavailable
 - Do not output any explanations"""
 
@@ -329,7 +354,7 @@ Students present: XX → Students present: 7
 
         history = ""
         plan_steps = [
-            {"action": "intent_analysis", "thought": "理解用户意图并规划" if self.language == "zh" else "Understand intent and plan", "llm": True},
+            {"action": "planning", "thought": "分析需求并规划数据收集" if self.language == "zh" else "Analyze request and plan data collection", "llm": True},
         ]
         step_index = 0
 
@@ -443,7 +468,7 @@ Students present: XX → Students present: 7
 
         start = time.perf_counter()
 
-        # Phase 1: Data collection — LLM decides which tools to call
+        # Phase 1: Data collection — LLM decides whether to reuse or re-collect
         logger.info("[ReportAgent] Starting ReAct loop — LLM-guided tool selection")
         for event in self._run_react_loop():
             yield event
@@ -532,10 +557,10 @@ Students present: XX → Students present: 7
             docx_path = os.path.join(session_dir, "class_report.docx")
             fill_template_from_text(template_path, replacements, docx_path)
 
-            # Save a readable summary for chat display
+            # Save only the replacement values for chat display
             summary_lines = []
-            for original, replacement in replacements.items():
-                summary_lines.append(f"- {original} → {replacement}")
+            for replacement in replacements.values():
+                summary_lines.append(f"- {replacement}")
             summary_text = "\n".join(summary_lines) if summary_lines else llm_response
             StorageManager.save(report_path, summary_text, append=False)
 

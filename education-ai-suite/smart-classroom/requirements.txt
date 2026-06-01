@@ -2,8 +2,8 @@ fastapi==0.116.1
 funasr==1.2.7
 
 # OpenVINO stack
-openvino==2026.1.0
-openvino-genai==2026.1.0.0
+openvino==2025.4.0
+openvino-genai==2025.4.0.0
 optimum==1.26.1
 optimum-intel==1.24.0
 nncf==2.19.0

@@ -1,8 +1,8 @@
 app:
   name: Smart Classroom
   cleanup_on_exit: true
-  use_ov_genai: False # True or False, applicable for provider: openvino
-  language: en # en or zh
+  use_ov_genai: True # True or False, applicable for provider: openvino
+  language: zh # en or zh
 
 monitoring:
   logs_dir: ./monitoring/logs
@@ -13,8 +13,8 @@ monitoring:
 
 models:
   asr:
-    provider: openai # openvino, funasr and openai supported
-    name: whisper-small  # can be (whisper-base, whisper-small etc) or paraformer-zh
+    provider: funasr # openvino, funasr and openai supported
+    name: paraformer-zh  # can be (whisper-base, whisper-small etc) or paraformer-zh
     device: CPU # CPU Recommended
     temperature: 0.0
     diarization: False
@@ -33,7 +33,7 @@ models:
 
   summarizer:
     provider: openvino 
-    name: Qwen/Qwen3-8B # Qwen/Qwen2.5-7B-Instruct or Qwen/Qwen3-8B
+    name: Qwen/Qwen2.5-7B-Instruct # Qwen/Qwen2.5-7B-Instruct or Qwen/Qwen3-8B
     device: GPU # GPU or CPU
     weight_format: int8 # supports fp16, int4, int8 (Recommended)
     max_new_tokens: 5120
@@ -479,4 +479,4 @@ content_search:
 
 router:
   enabled: true
-  mode: keyword  # keyword | llm
+  mode: "llm"  # keyword | llm
