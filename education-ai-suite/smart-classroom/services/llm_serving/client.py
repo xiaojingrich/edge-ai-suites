@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
-LLM_SERVICE_URL = os.environ.get("LLM_SERVICE_URL", "http://127.0.0.1:8899")
+LLM_SERVICE_URL = os.environ.get("LLM_SERVICE_URL", "http://127.0.0.1:9905")
 
 
 class LLMClientStreamer:

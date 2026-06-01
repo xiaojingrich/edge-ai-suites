@@ -22,7 +22,7 @@ class SummarizerComponent(PipelineComponent):
                 from services.llm_serving.client import LLMServiceClient
                 from utils.ensure_model import get_model_path
 
-                llm_port = int(os.environ.get("LLM_SERVICE_PORT", "8899"))
+                llm_port = int(os.environ.get("LLM_SERVICE_PORT", "9905"))
                 SummarizerComponent._model = LLMServiceClient(
                     model_path=get_model_path(),
                     base_url=f"http://127.0.0.1:{llm_port}",

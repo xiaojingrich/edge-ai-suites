@@ -43,7 +43,7 @@ def system_check():
         sys.exit(1)
 
 
-LLM_SERVICE_PORT = int(os.environ.get("LLM_SERVICE_PORT", "8899"))
+LLM_SERVICE_PORT = int(os.environ.get("LLM_SERVICE_PORT", "9905"))
 _llm_service_process = None
 
 

@@ -419,7 +419,7 @@ Header.tsx
 ## Model Lifecycle
 
 ```
-Qwen3-8B (OpenVINO INT8) 作为独立服务运行 (port 8899):
+Qwen3-8B (OpenVINO INT8) 作为独立服务运行 (port 9905):
 
   LLM Service (llm_serving/app.py):
     - 启动时加载模型到 GPU，常驻内存
@@ -428,7 +428,7 @@ Qwen3-8B (OpenVINO INT8) 作为独立服务运行 (port 8899):
     - 支持 stream/non-stream 两种模式
 
   Agent/Summarizer 通过 HTTP 调用:
-    LLMServiceClient → POST http://127.0.0.1:8899/v1/chat/completions
+    LLMServiceClient → POST http://127.0.0.1:9905/v1/chat/completions
 
 保护机制:
   - audio_pipeline_lock: Agent 启动前检测，如 ASR/Summary 正在用 LLM 则拒绝
@@ -850,7 +850,7 @@ OpenClaw 是可选的云端编排层。部署后提供更精准的意图识别�
 
 - Node.js 22.19+ 或 Node 24
 - 至少一个 LLM Provider（云端 API key 或 Smart Classroom 本地 Qwen3-8B）
-- Smart Classroom 服务已启动（`localhost:8000`，LLM service on `:8899`）
+- Smart Classroom 服务已启动（`localhost:8000`，LLM service on `:9905`）
 
 ### Step 1: 安装 OpenClaw
 
@@ -882,7 +882,7 @@ OPENAI_API_KEY=sk-...   # 云端时用 (纯本地时可不配)
     "providers": {
       "openai": {},
       "smart-classroom": {
-        "baseUrl": "http://127.0.0.1:8899",
+        "baseUrl": "http://127.0.0.1:9905",
         "apiKey": "local",
         "api": "openai-completions",
         "models": []
@@ -920,7 +920,7 @@ OPENAI_API_KEY=sk-...   # 云端时用 (纯本地时可不配)
 }
 ```
 
-> **注意**: 本地 fallback 直接使用 Smart Classroom 的 LLM service (`localhost:8899/v1/chat/completions`)，
+> **注意**: 本地 fallback 直接使用 Smart Classroom 的 LLM service (`localhost:9905/v1/chat/completions`)，
 > 复用已加载的 Qwen3-8B 模型，无需额外模型服务。
 
 ### Step 3: 添加 Skills
@@ -947,7 +947,7 @@ cp -r /path/to/smart-classroom/openclaw-skills/* ~/.openclaw/workspace-classroom
 ```bash
 # 启动 Smart Classroom (LLM service + 主服务)
 cd /path/to/smart-classroom
-python main.py  # localhost:8000, LLM service on :8899
+python main.py  # localhost:8000, LLM service on :9905
 
 # 启动 OpenClaw
 openclaw gateway start
@@ -962,7 +962,7 @@ openclaw skills list  # 验证 skills 加载
 curl http://localhost:8000/health
 
 # LLM Service 健康检查
-curl http://localhost:8899/health
+curl http://localhost:9905/health
 
 # 通过 OpenClaw 对话测试
 openclaw chat "帮我分析今天课堂的学生参与度"

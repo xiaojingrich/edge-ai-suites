@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("llm_serving")
 
 LLM_HOST = os.environ.get("LLM_HOST", "127.0.0.1")
-LLM_PORT = int(os.environ.get("LLM_PORT", "8899"))
+LLM_PORT = int(os.environ.get("LLM_PORT", "9905"))
 LLM_MODEL_PATH = os.environ.get("LLM_MODEL_PATH", "")
 LLM_DEVICE = os.environ.get("LLM_DEVICE", "GPU")
 LLM_MAX_NEW_TOKENS = int(os.environ.get("LLM_MAX_NEW_TOKENS", "5120"))
