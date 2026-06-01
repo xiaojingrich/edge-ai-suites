@@ -46,6 +46,33 @@
   gap: 8px;
 }
 
+.agent-session-selector {
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border-color, #e0e0e0);
+  flex-shrink: 0;
+}
+
+.agent-session-select {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 6px;
+  background: var(--bg-secondary, #f8f8f8);
+  color: var(--text-primary, #333);
+  cursor: pointer;
+  outline: none;
+}
+
+.agent-session-select:focus {
+  border-color: var(--accent-color, #4a90d9);
+}
+
+.agent-session-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .agent-dialog-close {
   width: 28px;
   height: 28px;

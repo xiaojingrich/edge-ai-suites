@@ -305,7 +305,7 @@ Speaking speed XXX chars/min → Speaking speed 218 chars/min
 
         return actions
 
-    def _fuzzy_match_tool(self, action: str) -> str:
+def _fuzzy_match_tool(self, action: str) -> str:
         """Fuzzy match an action name to a registered tool (handles 7B model typos)."""
         available = self.tools.get_available_tools()
         if action in available:
@@ -617,6 +617,7 @@ Speaking speed XXX chars/min → Speaking speed 218 chars/min
                 "performance.report_ttft": f"{round(ttft, 4)}s",
             },
         )
+
 
     def process(self, _):
         """PipelineComponent interface."""

@@ -987,11 +987,18 @@ async def report_chat(request: AgentChatRequest):
         if hasattr(pipeline, 'report_agent') and pipeline.report_agent and pipeline.report_agent.observations:
             conv_manager.add_observations(conversation_id, pipeline.report_agent.observations)
 
-        # Signal that a downloadable report is available (if not already sent by template mode)
-        if not report_ready_sent and full_response and len(full_response) > 200:
+        # Signal that a downloadable report is available (only for report mode, not chat)
+        if not report_ready_sent and full_response and request.output_format == "report":
             yield json.dumps({"type": "report_ready", "session_id": session_id, "conversation_id": conversation_id}) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/json")
+
+
+@router.get("/sessions")
+def list_sessions():
+    """List all available sessions (sorted newest first)."""
+    from utils.session_manager import list_sessions
+    return {"sessions": list_sessions()}
 
 
 @router.get("/conversations/{session_id}")

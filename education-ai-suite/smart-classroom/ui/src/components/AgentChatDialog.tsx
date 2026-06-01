@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useAppSelector } from '../redux/hooks';
-import { streamAgentChat, listConversations, getConversationMessages, deleteConversation, BASE_URL } from '../services/api';
-import type { PlanStep, ConversationPreview } from '../services/api';
+import { streamAgentChat, listConversations, getConversationMessages, deleteConversation, listSessions, BASE_URL } from '../services/api';
+import type { PlanStep, ConversationPreview, SessionInfo } from '../services/api';
 import { useTranslation } from 'react-i18next';
 import '../assets/css/AgentChat.css';
 
@@ -75,7 +75,7 @@ interface AgentChatDialogProps {
 
 const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
   const { t } = useTranslation();
-  const sessionId = useAppSelector(s => s.ui.sessionId);
+  const globalSessionId = useAppSelector(s => s.ui.sessionId);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -84,8 +84,24 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
   const [activePlan, setActivePlan] = useState<PlanState | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [conversationList, setConversationList] = useState<ConversationPreview[]>([]);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  const sessionId = selectedSessionId || globalSessionId;
+
+  useEffect(() => {
+    if (open) {
+      listSessions().then(setSessions);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (globalSessionId && !selectedSessionId) {
+      setSelectedSessionId(globalSessionId);
+    }
+  }, [globalSessionId, selectedSessionId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -95,6 +111,14 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
     setMessages([]);
     setConversationId(null);
   }, [sessionId]);
+
+  const handleSessionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newSessionId = e.target.value;
+    setSelectedSessionId(newSessionId);
+    setMessages([]);
+    setConversationId(null);
+    setShowHistory(false);
+  };
 
   const sendMessage = useCallback(async (userMessage: string) => {
     if (!userMessage.trim() || !sessionId || isStreaming) return;
@@ -282,6 +306,24 @@ const AgentChatDialog: React.FC<AgentChatDialogProps> = ({ open, onClose }) => {
             <button className="agent-dialog-close" onClick={onClose}>&times;</button>
           </div>
         </div>
+
+        {sessions.length > 0 && (
+          <div className="agent-session-selector">
+            <select
+              value={sessionId || ''}
+              onChange={handleSessionChange}
+              disabled={isStreaming}
+              className="agent-session-select"
+            >
+              {sessions.map(s => (
+                <option key={s.session_id} value={s.session_id}>
+                  {s.session_id}
+                  {s.has_report ? ' ✔' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {showHistory && (
           <div className="agent-history-panel">

@@ -1317,6 +1317,20 @@ export async function deleteConversation(sessionId: string, conversationId: stri
   return res.ok;
 }
 
+export interface SessionInfo {
+  session_id: string;
+  has_transcription: boolean;
+  has_report: boolean;
+  has_summary: boolean;
+}
+
+export async function listSessions(): Promise<SessionInfo[]> {
+  const res = await fetch(`${BASE_URL}/sessions`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.sessions || [];
+}
+
 /** Map a MIME type string to a short, display-friendly extension label (e.g. "DOCX"). */
 export function mimeToShortType(mimeType: string): string {
   const MIME_MAP: Record<string, string> = {
