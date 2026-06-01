@@ -70,6 +70,13 @@ def read_template_text(template_path: str) -> str:
     return "\n".join(lines)
 
 
+def extract_placeholders(template_path: str) -> list[str]:
+    """Extract all {placeholder_name} and XXX-style placeholders from a .docx template."""
+    text = read_template_text(template_path)
+    placeholders = re.findall(r'\{(\w+)\}', text)
+    return list(dict.fromkeys(placeholders))
+
+
 def fill_template_from_text(template_path: str, replacements: dict, output_path: str) -> str:
     """Copy template and apply text replacements, preserving all formatting.
 

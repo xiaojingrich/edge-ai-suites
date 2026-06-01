@@ -169,14 +169,15 @@ class ReportAgent(PipelineComponent):
         )
 
     def _build_template_fill_prompt(self, template_path: str) -> str:
-        """Build prompt for LLM to output the complete filled report text.
+        """Build prompt for LLM to output replacement pairs for the template.
 
-        LLM sees the template text + collected data, outputs the full report
-        with all placeholders replaced by actual data.
+        Dynamically extracts placeholders from the template file, so any
+        template format works without changing this code.
         """
-        from utils.template_manager import read_template_text
+        from utils.template_manager import read_template_text, extract_placeholders
 
         template_text = read_template_text(template_path)
+        placeholders = extract_placeholders(template_path)
         observations_text = "\n\n".join(self.observations)
 
         project_config = RuntimeConfig.get_section("Project")
@@ -188,32 +189,52 @@ class ReportAgent(PipelineComponent):
             f"报告时间: {_time.strftime('%Y年%m月%d日 %H:%M')}\n"
         )
 
+        placeholders_list = "\n".join(f"- {{{p}}}" for p in placeholders)
+
         if self.language == "zh":
-            user_content = f"""根据下面的课堂数据，按照指定的章节结构生成一份课堂评估报告。
+            user_content = f"""下面是一份课堂报告模板和收集到的课堂数据。请为模板中的每个占位符提供替换值。
 
-<DATA>
+## 模板中的占位符：
+{placeholders_list}
+
+## 基本信息
 {meta_info}
+
+## 收集到的课堂数据：
 {observations_text}
-</DATA>
 
-<STRUCTURE>
-{template_text}
-</STRUCTURE>
+## 输出格式：
+每行一条，格式为：占位符 → 替换值
+例如：
+{{{placeholders[0] if placeholders else 'field'}}} → 对应的值
 
-直接输出 Markdown 格式的报告正文。不要输出任何前言、解释或"以下是报告"之类的话。把所有 XXX/XX 占位符替换为实际数据，没有数据的写"暂无数据"。"""
+## 要求：
+- 每行一条替换映射，用 → 分隔
+- 左侧必须是上面列出的占位符（含花括号）
+- 数据中没有的字段不要输出
+- 不要输出任何解释"""
         else:
-            user_content = f"""Generate a classroom evaluation report based on the data below, following the given section structure.
+            user_content = f"""Below is a classroom report template and collected classroom data. Provide a replacement value for each placeholder in the template.
 
-<DATA>
+## Placeholders in template:
+{placeholders_list}
+
+## Basic Info
 {meta_info}
+
+## Collected classroom data:
 {observations_text}
-</DATA>
 
-<STRUCTURE>
-{template_text}
-</STRUCTURE>
+## Output format:
+One per line: placeholder → value
+Example:
+{{{placeholders[0] if placeholders else 'field'}}} → corresponding value
 
-Output the report body directly in Markdown. No preamble or explanation. Replace all XXX/XX placeholders with actual data. Write "N/A" for unavailable fields."""
+## Requirements:
+- One replacement mapping per line, separated by →
+- Left side must be a placeholder from the list above (with curly braces)
+- Do not output fields where data is unavailable
+- Do not output any explanations"""
 
         system_msg = ("你是课堂评估报告助手。找出模板中的占位内容并输出替换映射。"
                       if self.language == "zh"
@@ -495,16 +516,38 @@ Output the report body directly in Markdown. No preamble or explanation. Replace
         first_token_time = None
 
         if use_template:
-            # Template mode: LLM outputs the complete filled report text (streamed)
-            StorageManager.save(report_path, "", append=False)
-            yield {"type": "step_start", "index": -1}
-            logger.info(f"[ReportAgent] Template mode: LLM generating filled report for {template_path}")
+            # Template mode: LLM outputs replacement pairs, apply on .docx copy
+            from utils.template_manager import parse_replacements_from_llm, fill_template_from_text
 
-            streamer = self.model.generate(output_prompt, stream=True)
-            for token in streamer:
-                if first_token_time is None:
-                    first_token_time = time.perf_counter()
-                StorageManager.save_async(report_path, token, append=True)
+            yield {"type": "step_start", "index": -1}
+            logger.info(f"[ReportAgent] Template mode: LLM generating replacements for {template_path}")
+
+            try:
+                llm_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
+            except RuntimeError as e:
+                logger.error(f"[ReportAgent] LLM failed during template fill: {e}")
+                err_msg = ("报告生成失败：LLM服务超时或出错，请稍后重试。"
+                           if self.language == "zh"
+                           else "Report generation failed. Please try again.")
+                yield {"type": "token", "content": err_msg}
+                yield {"type": "step_done", "index": -1}
+                return
+
+            first_token_time = time.perf_counter()
+            replacements = parse_replacements_from_llm(llm_response)
+            logger.info(f"[ReportAgent] LLM returned {len(replacements)} replacements")
+
+            docx_path = os.path.join(session_dir, "class_report.docx")
+            fill_template_from_text(template_path, replacements, docx_path)
+
+            # Save only the replacement values for chat display
+            summary_lines = []
+            for replacement in replacements.values():
+                summary_lines.append(f"- {replacement}")
+            summary_text = "\n".join(summary_lines) if summary_lines else llm_response
+            StorageManager.save(report_path, summary_text, append=False)
+
+            for token in summary_text:
                 yield {"type": "token", "content": token}
 
             yield {"type": "step_done", "index": -1}
