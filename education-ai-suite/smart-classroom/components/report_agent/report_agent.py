@@ -189,41 +189,31 @@ class ReportAgent(PipelineComponent):
         )
 
         if self.language == "zh":
-            user_content = f"""下面是一份课堂报告模板和收集到的课堂数据。请将模板中所有占位内容（如 XXX、XX、{{placeholder}} 等）替换为实际数据，输出完整的填好的报告文本。
+            user_content = f"""根据下面的课堂数据，按照指定的章节结构生成一份课堂评估报告。
 
-## 基本信息
+<DATA>
 {meta_info}
-
-## 报告模板原文：
-{template_text}
-
-## 收集到的课堂数据：
 {observations_text}
+</DATA>
 
-## 要求：
-- 输出完整的报告文本，保持模板的章节结构不变
-- 将所有占位符替换为对应的实际数据
-- 数据中没有的字段写"暂无数据"
-- 不要添加额外的解释或说明
-- 直接输出报告正文，不要加"以下是报告"之类的前言"""
+<STRUCTURE>
+{template_text}
+</STRUCTURE>
+
+直接输出 Markdown 格式的报告正文。不要输出任何前言、解释或"以下是报告"之类的话。把所有 XXX/XX 占位符替换为实际数据，没有数据的写"暂无数据"。"""
         else:
-            user_content = f"""Below is a classroom report template and collected classroom data. Replace ALL placeholders (XXX, XX, {{placeholder}}, etc.) with actual data and output the complete filled report.
+            user_content = f"""Generate a classroom evaluation report based on the data below, following the given section structure.
 
-## Basic Info
+<DATA>
 {meta_info}
-
-## Report template:
-{template_text}
-
-## Collected classroom data:
 {observations_text}
+</DATA>
 
-## Requirements:
-- Output the complete report text, keeping the template's section structure
-- Replace all placeholders with corresponding actual data
-- Write "N/A" for fields where data is unavailable
-- Do not add extra explanations
-- Output the report body directly, no preamble"""
+<STRUCTURE>
+{template_text}
+</STRUCTURE>
+
+Output the report body directly in Markdown. No preamble or explanation. Replace all XXX/XX placeholders with actual data. Write "N/A" for unavailable fields."""
 
         system_msg = ("你是课堂评估报告助手。找出模板中的占位内容并输出替换映射。"
                       if self.language == "zh"
