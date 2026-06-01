@@ -475,8 +475,8 @@ class ReportAgent(PipelineComponent):
             fill_template(template_path, field_values, docx_path)
 
             # Read the filled docx as markdown for chat display (single source of truth)
-            from utils.template_manager import read_template_text
-            summary_lines = [read_template_text(docx_path)]
+            from utils.template_manager import read_docx_as_markdown
+            summary_lines = [read_docx_as_markdown(docx_path)]
 
             markdown_summary = "\n".join(summary_lines)
             StorageManager.save(report_path, markdown_summary, append=False)

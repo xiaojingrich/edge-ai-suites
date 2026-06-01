@@ -69,6 +69,26 @@ def read_template_text(template_path: str) -> str:
     return "\n".join(lines)
 
 
+def read_docx_as_markdown(docx_path: str) -> str:
+    """Read a filled .docx and convert to markdown with heading structure."""
+    doc = Document(docx_path)
+    lines = []
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        if para.style.name.startswith('Heading'):
+            level = int(para.style.name.replace('Heading ', '').replace('Heading', '1'))
+            lines.append(f"\n{'#' * level} {text}\n")
+        elif para.style.name == 'Title':
+            lines.append(f"\n# {text}\n")
+        elif para.style.name.startswith('List'):
+            lines.append(f"- {text}")
+        else:
+            lines.append(text)
+    return "\n".join(lines)
+
+
 def extract_template_structure(template_path: str) -> dict:
     """Extract the structure from a .docx template.
 

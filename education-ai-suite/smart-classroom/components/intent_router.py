@@ -172,7 +172,9 @@ Output ONLY the agent name, nothing else.
 Available agents:
 {agent_descriptions}
 
-Special: if the user wants a FULL/COMPLETE report, output "report_full" instead of "report".
+Special rule for "report" agent:
+- Output "report_full" when user wants to GENERATE/CREATE/REGENERATE a report (e.g., "生成报告", "重新生成报告", "generate a report", "generate a full report", "create report")
+- Output "report" when user asks a QUESTION about class data (e.g., "参与度怎么样", "哪个时段最低", "根据报告分析xxx", "analyze engagement")
 
 Valid outputs: [{', '.join(agent_names)}, report_full]"""
 
