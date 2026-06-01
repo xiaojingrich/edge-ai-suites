@@ -327,7 +327,7 @@ class ReportAgent(PipelineComponent):
                     should_generate = True
                     break
 
-                new_step = {"action": action, "thought": thought_text, "llm": step > 0}
+                new_step = {"action": action, "thought": thought_text, "llm": False}
                 plan_steps.append(new_step)
 
                 full_plan = plan_steps + [{"action": "generate", "thought": generate_label, "llm": True}]
@@ -474,16 +474,9 @@ class ReportAgent(PipelineComponent):
             docx_path = os.path.join(session_dir, "class_report.docx")
             fill_template(template_path, field_values, docx_path)
 
-            # Save a readable markdown summary for chat display
-            summary_lines = []
-            if self.language == "zh":
-                summary_lines.append("# 课后总结报告\n")
-            else:
-                summary_lines.append("# Post-Class Summary Report\n")
-
-            for key, value in field_values.items():
-                if value and value not in ("暂无数据", "Data not available"):
-                    summary_lines.append(f"**{key}**: {value}\n")
+            # Read the filled docx as markdown for chat display (single source of truth)
+            from utils.template_manager import read_template_text
+            summary_lines = [read_template_text(docx_path)]
 
             markdown_summary = "\n".join(summary_lines)
             StorageManager.save(report_path, markdown_summary, append=False)
