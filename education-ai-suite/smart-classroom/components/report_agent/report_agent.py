@@ -27,7 +27,7 @@ from utils.config_loader import config
 from utils.runtime_config_loader import RuntimeConfig
 from utils.storage_manager import StorageManager
 from utils.locks import audio_pipeline_lock
-from utils.template_manager import get_template_path
+from utils.template_manager import get_template_path, extract_template_structure, build_template_fill_prompt, fill_template, parse_llm_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +104,25 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-    def _build_report_prompt(self) -> str:
+    def _build_report_prompt(self, use_template: bool = False) -> str:
         """Build the final report generation prompt with all collected observations."""
         observations_text = "\n\n---\n\n".join(self.observations)
+
+        if use_template:
+            template_path = get_template_path(self.language, self.session_id)
+            if template_path:
+                template_structure = extract_template_structure(template_path)
+                user_content = build_template_fill_prompt(template_structure, observations_text, self.language)
+                system_msg = ("你是一个专业的教育分析师。根据提供的数据填充报告模板字段，输出JSON。"
+                              if self.language == "zh"
+                              else "You are a professional educational analyst. Fill report template fields based on provided data. Output JSON.")
+                messages = [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_content},
+                ]
+                return self.model.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                )
 
         if self.language == "zh":
             user_content = REPORT_GENERATION_PROMPT_ZH.format(collected_observations=observations_text)
@@ -168,87 +184,7 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-    def _build_template_fill_prompt(self, template_path: str) -> str:
-        """Build prompt for LLM to output replacement pairs for the template.
-
-        Dynamically extracts placeholders from the template file, so any
-        template format works without changing this code.
-        """
-        from utils.template_manager import read_template_text, extract_placeholders
-
-        template_text = read_template_text(template_path)
-        placeholders = extract_placeholders(template_path)
-        observations_text = "\n\n".join(self.observations)
-
-        project_config = RuntimeConfig.get_section("Project")
-        import time as _time
-        meta_info = (
-            f"学校班级: {project_config.get('school_name', '')} {project_config.get('class_name', '')}\n"
-            f"课程名称: {project_config.get('course_name', '')}\n"
-            f"授课教师: {project_config.get('teacher_name', '')}\n"
-            f"报告时间: {_time.strftime('%Y年%m月%d日 %H:%M')}\n"
-        )
-
-        placeholders_list = "\n".join(f"- {{{p}}}" for p in placeholders)
-
-        if self.language == "zh":
-            user_content = f"""下面是一份课堂报告模板和收集到的课堂数据。请为模板中的每个占位符提供替换值。
-
-## 模板中的占位符：
-{placeholders_list}
-
-## 基本信息
-{meta_info}
-
-## 收集到的课堂数据：
-{observations_text}
-
-## 输出格式：
-每行一条，格式为：占位符 → 替换值
-例如：
-{{{placeholders[0] if placeholders else 'field'}}} → 对应的值
-
-## 要求：
-- 每行一条替换映射，用 → 分隔
-- 左侧必须是上面列出的占位符（含花括号）
-- 数据中没有的字段不要输出
-- 不要输出任何解释"""
-        else:
-            user_content = f"""Below is a classroom report template and collected classroom data. Provide a replacement value for each placeholder in the template.
-
-## Placeholders in template:
-{placeholders_list}
-
-## Basic Info
-{meta_info}
-
-## Collected classroom data:
-{observations_text}
-
-## Output format:
-One per line: placeholder → value
-Example:
-{{{placeholders[0] if placeholders else 'field'}}} → corresponding value
-
-## Requirements:
-- One replacement mapping per line, separated by →
-- Left side must be a placeholder from the list above (with curly braces)
-- Do not output fields where data is unavailable
-- Do not output any explanations"""
-
-        system_msg = ("你是课堂评估报告助手。找出模板中的占位内容并输出替换映射。"
-                      if self.language == "zh"
-                      else "You are a classroom report assistant. Identify placeholders and output replacement mappings.")
-
-        messages = [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_content},
-        ]
-        return self.model.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-        )
-
-    def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
+def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
         """Parse LLM output to extract one or more Action calls.
 
         Supports two formats:
@@ -506,24 +442,21 @@ Example:
         use_template = is_report and template_path is not None
 
         if use_template:
-            output_prompt = self._build_template_fill_prompt(template_path)
-            logger.info(f"[ReportAgent] Template mode: LLM fills template from collected data")
+            output_prompt = self._build_report_prompt(use_template=True)
         elif is_report:
-            output_prompt = self._build_report_prompt()
+            output_prompt = self._build_report_prompt(use_template=False)
         else:
             output_prompt = self._build_chat_prompt()
 
         first_token_time = None
 
         if use_template:
-            # Template mode: LLM outputs replacement pairs, apply on .docx copy
-            from utils.template_manager import parse_replacements_from_llm, fill_template_from_text
-
+            # Template mode: LLM generates JSON, fill the .docx template
             yield {"type": "step_start", "index": -1}
-            logger.info(f"[ReportAgent] Template mode: LLM generating replacements for {template_path}")
+            logger.info(f"[ReportAgent] Template mode: generating JSON to fill {template_path}")
 
             try:
-                llm_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
+                json_response = self._call_llm_sync(output_prompt, max_new_tokens=2048)
             except RuntimeError as e:
                 logger.error(f"[ReportAgent] LLM failed during template fill: {e}")
                 err_msg = ("报告生成失败：LLM服务超时或出错，请稍后重试。"
@@ -534,27 +467,35 @@ Example:
                 return
 
             first_token_time = time.perf_counter()
-            replacements = parse_replacements_from_llm(llm_response)
-            logger.info(f"[ReportAgent] LLM returned {len(replacements)} replacements")
+            field_values = parse_llm_json_response(json_response)
+            logger.info(f"[ReportAgent] Parsed {len(field_values)} fields from LLM response")
 
+            # Fill the template and save as .docx
             docx_path = os.path.join(session_dir, "class_report.docx")
-            fill_template_from_text(template_path, replacements, docx_path)
+            fill_template(template_path, field_values, docx_path)
 
-            # Save only the replacement values for chat display
+            # Save a readable markdown summary for chat display
             summary_lines = []
-            for replacement in replacements.values():
-                summary_lines.append(f"- {replacement}")
-            summary_text = "\n".join(summary_lines) if summary_lines else llm_response
-            StorageManager.save(report_path, summary_text, append=False)
+            if self.language == "zh":
+                summary_lines.append("# 课后总结报告\n")
+            else:
+                summary_lines.append("# Post-Class Summary Report\n")
 
-            for token in summary_text:
+            for key, value in field_values.items():
+                if value and value not in ("暂无数据", "Data not available"):
+                    summary_lines.append(f"**{key}**: {value}\n")
+
+            markdown_summary = "\n".join(summary_lines)
+            StorageManager.save(report_path, markdown_summary, append=False)
+
+            for token in markdown_summary:
                 yield {"type": "token", "content": token}
 
             yield {"type": "step_done", "index": -1}
             yield {"type": "report_ready", "session_id": self.session_id}
 
         elif is_report:
-            # Report mode (no template): stream markdown and save to file
+            # No template: stream markdown directly
             StorageManager.save(report_path, "", append=False)
             yield {"type": "step_start", "index": -1}
             streamer = self.model.generate(output_prompt, stream=True)

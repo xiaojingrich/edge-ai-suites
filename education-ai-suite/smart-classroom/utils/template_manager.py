@@ -1,20 +1,19 @@
 """
 Report Template Manager.
 
-Handles loading .docx templates, reading their text content for LLM,
-and filling templates by replacing text in a copy (preserving formatting).
+Handles loading .docx templates, extracting their structure (sections + placeholders),
+and filling templates with LLM-generated content.
 
 Template format:
-- Any .docx file with placeholder text (XXX, XX, etc.)
-- No special markup required — LLM decides what to replace
-- Original template is never modified (always works on a copy)
+- Headings define sections
+- Text inside {placeholder} marks fields the LLM should fill
+- Static text (without placeholders) is preserved as-is
 """
 
 import os
 import re
 import json
 import logging
-import shutil
 from pathlib import Path
 from docx import Document
 
@@ -70,52 +69,137 @@ def read_template_text(template_path: str) -> str:
     return "\n".join(lines)
 
 
-def extract_placeholders(template_path: str) -> list[str]:
-    """Extract all {placeholder_name} and XXX-style placeholders from a .docx template."""
-    text = read_template_text(template_path)
-    placeholders = re.findall(r'\{(\w+)\}', text)
-    return list(dict.fromkeys(placeholders))
+def extract_template_structure(template_path: str) -> dict:
+    """Extract the structure from a .docx template.
 
-
-def fill_template_from_text(template_path: str, replacements: dict, output_path: str) -> str:
-    """Copy template and apply text replacements, preserving all formatting.
-
-    Args:
-        template_path: Source .docx template (never modified)
-        replacements: Dict of {original_text: replacement_text}
-        output_path: Where to save the filled copy
-
-    Returns the output_path.
+    Returns a dict with:
+      - sections: list of {heading, level, fields: [field_names]}
+      - all_fields: flat list of all placeholder names
+      - raw_text: full template text for LLM reference
     """
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(template_path, output_path)
-
-    doc = Document(output_path)
+    doc = Document(template_path)
+    sections = []
+    all_fields = []
+    raw_lines = []
+    current_section = None
 
     for para in doc.paragraphs:
-        _apply_replacements(para, replacements)
+        text = para.text.strip()
+        if not text:
+            continue
+
+        raw_lines.append(text)
+
+        if para.style.name.startswith('Heading'):
+            level = int(para.style.name.replace('Heading ', '').replace('Heading', '1'))
+            current_section = {"heading": text, "level": level, "fields": []}
+            sections.append(current_section)
+        else:
+            placeholders = re.findall(r'\{(\w+)\}', text)
+            if placeholders:
+                all_fields.extend(placeholders)
+                if current_section:
+                    current_section["fields"].extend(placeholders)
+
+    return {
+        "sections": sections,
+        "all_fields": list(dict.fromkeys(all_fields)),
+        "raw_text": "\n".join(raw_lines),
+    }
+
+
+def build_template_fill_prompt(template_structure: dict, collected_observations: str, language: str = "zh") -> str:
+    """Build a prompt that asks the LLM to fill template fields based on collected data."""
+    fields = template_structure["all_fields"]
+    raw_text = template_structure["raw_text"]
+
+    if language == "zh":
+        prompt = f"""你是一个课堂评估报告生成器。根据收集到的课堂数据，按照报告模板的结构填写所有字段。
+
+## 报告模板结构：
+{raw_text}
+
+## 收集到的课堂数据：
+{collected_observations}
+
+## 任务：
+请根据以上数据，为模板中的每个占位字段生成对应内容。输出严格的JSON格式，key为字段名，value为填充内容。
+
+需要填写的字段：
+{json.dumps(fields, ensure_ascii=False)}
+
+## 规则：
+- 仅使用收集到的数据，不要编造统计数据
+- 如果某个字段的数据不可用，填写"暂无数据"
+- 数值型字段直接填数字或带单位的值
+- 描述型字段用简洁的句子，不超过2-3句话
+- recommendations 字段用换行符分隔多条建议
+- keywords 字段用顿号（、）分隔关键词
+- 输出纯JSON，不要包含```json标记或其他文字
+
+输出JSON："""
+    else:
+        prompt = f"""You are a classroom evaluation report generator. Based on the collected classroom data, fill in all template fields.
+
+## Report Template Structure:
+{raw_text}
+
+## Collected Classroom Data:
+{collected_observations}
+
+## Task:
+Based on the data above, generate content for each placeholder field in the template. Output strict JSON format, with field names as keys and fill content as values.
+
+Fields to fill:
+{json.dumps(fields, ensure_ascii=False)}
+
+## Rules:
+- Use ONLY the collected data, do NOT invent statistics
+- If data for a field is unavailable, fill with "Data not available"
+- Numeric fields: use numbers or values with units
+- Descriptive fields: use concise sentences, no more than 2-3 sentences
+- recommendations field: separate multiple items with newlines
+- keywords field: separate with commas
+- Output pure JSON only, no ```json markers or other text
+
+Output JSON:"""
+
+    return prompt
+
+
+def fill_template(template_path: str, field_values: dict, output_path: str) -> str:
+    """Fill a .docx template with values and save to output_path."""
+    doc = Document(template_path)
+
+    for para in doc.paragraphs:
+        _replace_placeholders_in_paragraph(para, field_values)
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    _apply_replacements(para, replacements)
+                    _replace_placeholders_in_paragraph(para, field_values)
 
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
-    logger.info(f"Template-based report saved to {output_path} ({len(replacements)} replacements)")
+    logger.info(f"Template-based report saved to {output_path}")
     return output_path
 
 
-def _apply_replacements(paragraph, replacements: dict):
-    """Apply text replacements in a paragraph while preserving run formatting."""
+def _replace_placeholders_in_paragraph(paragraph, field_values: dict):
+    """Replace {field_name} placeholders in a paragraph while preserving formatting."""
     full_text = paragraph.text
-    if not full_text.strip():
+    if '{' not in full_text:
+        return
+
+    placeholders = re.findall(r'\{(\w+)\}', full_text)
+    if not placeholders:
         return
 
     new_text = full_text
-    for original, replacement in replacements.items():
-        if original in new_text:
-            new_text = new_text.replace(original, replacement)
+    for field_name in placeholders:
+        value = field_values.get(field_name, "")
+        new_text = new_text.replace(f'{{{field_name}}}', str(value))
 
     if new_text == full_text:
         return
@@ -127,32 +211,22 @@ def _apply_replacements(paragraph, replacements: dict):
             run.text = ""
 
 
-def parse_replacements_from_llm(response: str) -> dict:
-    """Parse LLM response containing 'original → replacement' lines into a dict.
+def parse_llm_json_response(response_text: str) -> dict:
+    """Parse LLM response as JSON, handling common formatting issues."""
+    text = response_text.strip()
+    if text.startswith('```'):
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
 
-    Supports formats:
-      - "原文 → 替换后"
-      - "原文 -> 替换后"
-    """
-    replacements = {}
-    for line in response.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
 
-        sep = None
-        if "→" in line:
-            sep = "→"
-        elif "->" in line:
-            sep = "->"
-        else:
-            continue
-
-        parts = line.split(sep, 1)
-        if len(parts) == 2:
-            original = parts[0].strip().strip('"').strip("'")
-            replacement = parts[1].strip().strip('"').strip("'")
-            if original and replacement and original != replacement:
-                replacements[original] = replacement
-
-    return replacements
+    logger.warning(f"Failed to parse LLM JSON response: {text[:200]}")
+    return {}
