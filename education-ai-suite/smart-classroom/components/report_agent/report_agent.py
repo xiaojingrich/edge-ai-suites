@@ -184,7 +184,7 @@ class ReportAgent(PipelineComponent):
             add_generation_prompt=True,
         )
 
-def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
+    def _parse_actions(self, llm_output: str) -> list[tuple[str, str]]:
         """Parse LLM output to extract one or more Action calls.
 
         Supports two formats:
