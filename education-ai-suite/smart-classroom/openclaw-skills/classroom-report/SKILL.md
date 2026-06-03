@@ -20,12 +20,12 @@ Use this skill when the user's request involves:
 
 - Viewing or querying classroom session data
 - Analyzing student engagement, teaching behavior, or lesson content
-- Generating classroom evaluation reports (with or without a docx template)
+- Generating classroom evaluation reports (Markdown)
 - Any question that requires reading data from a recorded class session
 
 ## MCP Tools
 
-All data access goes through the `smart-classroom` MCP server:
+All data access goes through the `smart-classroom` MCP server. Reports are returned as Markdown text (no docx tool required).
 
 | Tool | Purpose |
 |------|---------|
@@ -144,24 +144,18 @@ When user asks a specific question about classroom data:
 
 ### Report Generation
 
-When user asks to generate a report, always output a .docx file. Determine whether a custom template is provided:
+When user asks to generate a report, output the report as **Markdown** following the default template structure below.
 
-#### Data collection (same for both cases)
+#### Data collection
 
 1. Call `get_teaching_stats` for teacher statistics (speaking speed, duration, question count, class duration)
 2. Call `read_session_files` for content and engagement data (`summary.md`, `topics.json`, `mindmap.mmd`, `va/class_statistics.json`)
 
-#### With Custom Template (user uploaded a .docx template)
+#### Compose the report
 
-3. Use the docx tool to parse the uploaded template — extract section headings and `{placeholder}` fields
-4. Fill all placeholder fields based on the collected data
-5. Use the docx tool to generate the .docx file
-
-#### Without Custom Template (use default template)
-
-3. Use the default template structure below
-4. Fill all `{placeholder}` fields based on the collected data
-5. Use the docx tool to generate the .docx file
+3. Follow the default template structure below
+4. Compute each `{placeholder}` value from the collected data and replace it inline
+5. Output the finished report as Markdown (headings, tables, lists). Do not wrap it in a code block.
 
 <details>
 <summary>Default template — Chinese</summary>

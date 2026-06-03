@@ -3,14 +3,18 @@
 ## Architecture
 
 ```
-┌──────────────┐       ┌────────────────────┐       ┌──────────────────┐
-│   OpenClaw   │──────▶│  vLLM              │       │  MCP Server      │
-│              │◀──────│  (Qwen2.5-7B)      │       │  (smart-classroom)│
-│  - Skill     │       │  :9905             │       │  :8100           │
-│  - MCP Client│──────────────────────────────────▶│  - list_sessions  │
-│  - Loop      │◀──────────────────────────────────│  - read_session_  │
-│              │       └────────────────────┘       │    files          │
-└──────────────┘                                    └──────────────────┘
+┌──────────────┐       ┌────────────────────┐       ┌──────────────────────┐
+│   OpenClaw   │──────▶│  OVMS              │       │  MCP Server          │
+│              │◀──────│  (Qwen2.5-7B, OV)  │       │  (smart-classroom)   │
+│  - Skill     │       │  :8000/v3          │       │  :8100 (SSE)         │
+│  - MCP Client│──────────────────────────────────▶│  - list_sessions     │
+│  - ReAct Loop│◀──────────────────────────────────│  - read_session_files│
+│              │       └────────────────────┘       │  - get_teaching_stats│
+└──────────────┘                                    └──────────────────────┘
+
+Agent 完全运行在 OpenClaw 侧；Smart Classroom 只作为 MCP 工具服务器，
+不再做编排/推理。本地 LLM 用 OpenVINO Model Server (OVMS)，在 Intel GPU 上
+提供原生 function calling（部署时配 tool_parser: hermes3 解析 Qwen2.5 tool call）。
 ```
 
 ## End-to-End Flow
@@ -22,7 +26,7 @@
 │     ↓                                                                   │
 │  2. Skill 触发: classroom-report                                        │
 │     ↓                                                                   │
-│  3. OpenClaw 构建请求发给 vLLM:                                           │
+│  3. OpenClaw 构建请求发给 OVMS:                                          │
 │     {                                                                   │
 │       "messages": [{"role":"system", "content":"你是课堂评估分析师..."},    │
 │                    {"role":"user", "content":"生成课堂报告"}],             │
@@ -33,13 +37,13 @@
 │     }                                                                   │
 │     ↓                                                                   │
 └─────┼───────────────────────────────────────────────────────────────────┘
-      │ HTTP POST /v1/chat/completions
+      │ HTTP POST /v3/chat/completions
       ↓
-┌─ vLLM (Qwen2.5-7B-Instruct) ───────────────────────────────────────────┐
+┌─ OVMS (Qwen2.5-7B-Instruct, OpenVINO) ─────────────────────────────────┐
 │                                                                         │
-│  4. vLLM 内部处理 tools schema + 生成                                     │
+│  4. OVMS 内部处理 tools schema + 生成                                     │
 │     ↓                                                                   │
-│  5. 模型决定调用工具，vLLM 原生解析 tool call                               │
+│  5. 模型决定调用工具，tool_parser(hermes3) 解析 tool call                  │
 │     ↓                                                                   │
 │  6. 返回 OpenAI 格式响应:                                                 │
 │     {"tool_calls":[{"function":{"name":"list_sessions"}}],              │
@@ -65,19 +69,19 @@
       ↓
 ┌─ OpenClaw ──────────────────────────────────────────────────────────────┐
 │                                                                         │
-│  9. 把 tool 结果塞入 messages 继续请求 vLLM:                               │
+│  9. 把 tool 结果塞入 messages 继续请求 OVMS:                              │
 │     messages: [...之前的...,                                             │
 │       {"role":"assistant","tool_calls":[...]},                           │
 │       {"role":"tool","tool_call_id":"call_xxx",                          │
 │        "content":"{\"sessions\":[...]}"}                                │
 │     ]                                                                   │
-│     ↓ 再次 POST /v1/chat/completions                                    │
+│     ↓ 再次 POST /v3/chat/completions                                    │
 │                                                                         │
 │  10. 模型返回下一个 tool_call: read_session_files(...)                    │
 │      ↓                                                                  │
 │  11. OpenClaw 执行 MCP → 拿到文件内容                                     │
 │      ↓                                                                  │
-│  12. 再次发给 vLLM，这次模型有了所有数据                                     │
+│  12. 再次发给 OVMS，这次模型有了所有数据                                    │
 │      ↓                                                                  │
 │  13. 模型返回最终报告文本 (finish_reason: "stop")                          │
 │      ↓                                                                  │
@@ -100,13 +104,13 @@ OpenClaw matches this to the `classroom-report` skill and starts the function ca
 
 ### Step 2: First LLM Request (with tools)
 
-OpenClaw sends to vLLM:
+OpenClaw sends to OVMS:
 
 ```json
-POST http://<vllm-host>:9905/v1/chat/completions
+POST http://<ovms-host>:8000/v3/chat/completions
 
 {
-  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model": "Qwen2.5-7B-Instruct",
   "messages": [
     {"role": "system", "content": "<SKILL.md content>"},
     {"role": "user", "content": "生成课堂报告"}
@@ -139,9 +143,9 @@ POST http://<vllm-host>:9905/v1/chat/completions
 }
 ```
 
-### Step 3: vLLM Responds with Tool Call
+### Step 3: OVMS Responds with Tool Call
 
-vLLM natively parses the model's tool call output and returns OpenAI-format response:
+With `tool_parser: hermes3` configured, OVMS parses the model's tool call output and returns an OpenAI-format response:
 
 ```json
 {
@@ -190,7 +194,7 @@ OpenClaw appends tool result to messages and sends again:
 
 ```json
 {
-  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model": "Qwen2.5-7B-Instruct",
   "messages": [
     {"role": "system", "content": "<SKILL.md content>"},
     {"role": "user", "content": "生成课堂报告"},
@@ -201,7 +205,7 @@ OpenClaw appends tool result to messages and sends again:
 }
 ```
 
-### Step 6: vLLM Requests File Contents
+### Step 6: OVMS Requests File Contents
 
 Response:
 
@@ -237,9 +241,9 @@ MCP Server returns all file contents in one response.
 
 OpenClaw appends file contents to messages and sends the final request.
 
-### Step 9: vLLM Generates Final Report
+### Step 9: OVMS Generates Final Report
 
-Model now has all classroom data in context. Response:
+Model now has all classroom data in context. It returns the report as Markdown text:
 
 ```json
 {
@@ -255,76 +259,89 @@ Model now has all classroom data in context. Response:
 
 ### Step 10: OpenClaw Delivers to User
 
-`finish_reason: "stop"` → loop ends → display report to user.
+`finish_reason: "stop"` → loop ends → display the Markdown report to user.
 
 ## Summary
 
 | Round | Direction | Content |
 |-------|-----------|---------|
-| 1 | OpenClaw → vLLM | User message + tools schema |
-| 1 | vLLM → OpenClaw | `tool_calls: list_sessions` |
+| 1 | OpenClaw → OVMS | User message + tools schema |
+| 1 | OVMS → OpenClaw | `tool_calls: list_sessions` |
 | 1 | OpenClaw → MCP | Execute `list_sessions()` |
-| 2 | OpenClaw → vLLM | + tool result (session list) |
-| 2 | vLLM → OpenClaw | `tool_calls: read_session_files` |
+| 2 | OpenClaw → OVMS | + tool result (session list) |
+| 2 | OVMS → OpenClaw | `tool_calls: read_session_files` |
 | 2 | OpenClaw → MCP | Execute `read_session_files(...)` |
-| 3 | OpenClaw → vLLM | + tool result (file contents) |
-| 3 | vLLM → OpenClaw | Final report text (`stop`) |
+| 3 | OpenClaw → OVMS | + tool result (file contents) |
+| 3 | OVMS → OpenClaw | Final report Markdown (`stop`) |
 
 Typically **3 LLM rounds** for a full report generation.
 
 ## Deployment
 
-### 1. vLLM (LLM Service with Function Calling)
+### 1. OVMS (OpenVINO Model Server with Function Calling)
 
-vLLM provides native function calling support — no custom parsing needed.
+OVMS serves the LLM on Intel GPU/CPU with an OpenAI-compatible API and supports native function calling. The OpenAI-compatible chat endpoint is **`/v3/chat/completions`**.
 
-#### Install
+> ⚠️ **Function calling requires two things on OVMS:**
+> 1. A **Python-enabled** OVMS (tools are *not* supported in a no-Python configuration).
+> 2. A **`tool_parser`** configured on the servable (e.g. `hermes3` for Qwen2.5/Qwen3). Without it, the model's tool call is returned as plain text instead of structured `tool_calls`.
+>
+> The `tool_parser` is set in the servable's `graph.pbtxt` (`node_options`), not as a CLI flag. The easiest way is to let the export script generate it (see below).
 
-```bash
-pip install vllm
-```
+#### Export the model with a tool parser
 
-#### Start (from HuggingFace model)
-
-```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct \
-  --host 0.0.0.0 \
-  --port 9905 \
-  --device openvino \
-  --enable-auto-tool-choice \
-  --tool-call-parser hermes \
-  --max-model-len 8192
-```
-
-#### Start (from local model path)
+Use the OVMS export script (`demos/common/export_models/export_model.py`) to download/convert the model **and** write a `graph.pbtxt` that includes the tool parser:
 
 ```bash
-vllm serve /path/to/Qwen2.5-7B-Instruct \
-  --host 0.0.0.0 \
-  --port 9905 \
-  --enable-auto-tool-choice \
-  --tool-call-parser hermes \
-  --max-model-len 8192 \
-  --gpu-memory-utilization 0.9
+python export_model.py text_generation \
+  --source_model Qwen/Qwen2.5-7B-Instruct \
+  --model_repository_path models \
+  --target_device GPU \
+  --tool_parser hermes3 \
+  --enable_tool_guided_generation
 ```
 
-#### Parameters
+This produces `models/Qwen/Qwen2.5-7B-Instruct/` with a `graph.pbtxt` containing `tool_parser: "hermes3"` and `enable_tool_guided_generation: true`.
+
+#### Start OVMS (Docker, Intel GPU)
+
+```bash
+docker run --user $(id -u):$(id -g) -d \
+  --device /dev/dri \
+  --group-add=$(stat -c "%g" /dev/dri/render* | head -n 1) \
+  --rm -p 8000:8000 \
+  -v $(pwd)/models:/models:rw \
+  openvino/model_server:latest-gpu \
+  --model_repository_path /models \
+  --model_name Qwen2.5-7B-Instruct \
+  --model_path /models/Qwen/Qwen2.5-7B-Instruct \
+  --rest_port 8000 \
+  --target_device GPU
+```
+
+> Use the model name you want OpenClaw to reference as `--model_name` — it must match OpenClaw's `models[].id` and `model.primary`.
+
+#### Key parameters
 
 | Parameter | Purpose |
 |-----------|---------|
-| `--enable-auto-tool-choice` | Enable function calling support |
-| `--tool-call-parser hermes` | Parser format for Qwen2.5 tool calls |
-| `--max-model-len 8192` | Max context length (adjust as needed) |
-| `--gpu-memory-utilization 0.9` | GPU memory usage ratio |
+| `--target_device GPU` | Run on Intel GPU (`/dev/dri`). Use `CPU` to run on CPU. |
+| `--rest_port 8000` | REST port; OpenAI-compatible API served at `/v3/...`. |
+| `tool_parser: hermes3` (in `graph.pbtxt`) | Extract `tool_calls` from Qwen2.5/Qwen3 output. **Required for function calling.** |
+| `enable_tool_guided_generation: true` | Push the model to emit tool calls matching the `tools` schema. |
 
 #### Verify
 
 ```bash
-curl http://localhost:9905/v1/chat/completions \
+# 1) model ready
+curl http://localhost:8000/v1/config
+
+# 2) function calling — note the /v3 path
+curl http://localhost:8000/v3/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen2.5-7B-Instruct",
-    "messages": [{"role": "user", "content": "hello"}],
+    "model": "Qwen2.5-7B-Instruct",
+    "messages": [{"role": "user", "content": "list my classroom sessions"}],
     "tools": [
       {
         "type": "function",
@@ -337,6 +354,10 @@ curl http://localhost:9905/v1/chat/completions \
     ]
   }'
 ```
+
+A correct setup returns `"finish_reason": "tool_calls"` with a `tool_calls` array. If you instead get the tool call as plain text in `content`, the `tool_parser` is missing or the servable was built without Python.
+
+> **Endpoint note:** OVMS uses `/v3/chat/completions` (`messages` + `tools`). Make sure OpenClaw's provider `baseUrl` ends in `/v3` (see Configuration). Sending a legacy `/v1/completions`-style `{"prompt": "..."}` body drops `tools` and **function calling never happens** — an endpoint/format problem, not a parser problem.
 
 When the model decides to call a tool, the response will contain `tool_calls` directly — no manual parsing required.
 
@@ -376,46 +397,89 @@ openclaw skills list
 
 ## Configuration
 
-### OpenClaw MCP Server Config
+All of the following goes into `~/.openclaw/openclaw.json` (one file). Shown split by concern.
 
-```json
+### LLM Provider (OVMS)
+
+OVMS is a custom OpenAI-compatible provider. Register it under `models.providers` with `api: "openai-completions"`. **The `baseUrl` must end in `/v3`** (OVMS's OpenAI-compatible path), not `/v1`.
+
+```json5
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "ovms": {
+        // OVMS OpenAI-compatible endpoint — MUST end in /v3.
+        // OpenClaw's "openai-completions" API sends POST <baseUrl>/chat/completions
+        // with a `messages` body (NOT a legacy `prompt` body).
+        "baseUrl": "http://<ovms-host>:8000/v3",
+        "apiKey": "${OVMS_API_KEY}",
+        "api": "openai-completions",
+        "timeoutSeconds": 300,
+        "models": [
+          {
+            // id MUST match OVMS --model_name and the agent model.primary
+            "id": "Qwen2.5-7B-Instruct",
+            "name": "Qwen2.5-7B-Instruct (OVMS)",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "ovms/Qwen2.5-7B-Instruct" },
+      "skipBootstrap": true
+    }
+  }
+}
+```
+
+Set `OVMS_API_KEY` in `~/.openclaw/.env` (any non-empty value if OVMS does not enforce auth):
+
+```bash
+OVMS_API_KEY=ovms-local
+```
+
+> **Common pitfall (the `prompt` vs `messages` bug):** OpenClaw uses `models.providers.<id>` with
+> `"api": "openai-completions"`. There is **no** top-level `providers` block and **no** `"type": "openai-compatible"`
+> field — using those produces a malformed/legacy request shape. The correct `openai-completions` API always
+> POSTs to `<baseUrl>/chat/completions` with `messages` + `tools` (here `/v3/chat/completions`), which is what function calling requires.
+
+### MCP Server (Smart Classroom tools)
+
+```json5
 {
   "mcp": {
     "servers": {
       "smart-classroom": {
-        "url": "http://<smart-classroom-host>:8100/mcp",
+        // Smart Classroom MCP server runs SSE transport (see mcp_server/server.py, main.py).
+        // SSE endpoint path is /sse.
+        "url": "http://<smart-classroom-host>:8100/sse",
         "transport": "sse"
-      },
-      "docx-tools": {
-        "command": "npx",
-        "args": ["docx-mcp-server"]
       }
     }
   }
 }
 ```
 
-- `smart-classroom`: Provides classroom session data (list_sessions, read_session_files)
-- `docx-tools`: Provides docx template parsing and filling for report generation (third-party MCP server, replace with actual package name)
+- `smart-classroom`: classroom session data + stats (`list_sessions`, `read_session_files`, `get_teaching_stats`)
 
-### OpenClaw LLM Provider Config
-
-```json
-{
-  "providers": {
-    "smart-classroom-llm": {
-      "type": "openai-compatible",
-      "baseUrl": "http://<vllm-host>:9905/v1",
-      "model": "Qwen/Qwen2.5-7B-Instruct"
-    }
-  }
-}
-```
+> **Report output format:** reports are generated as **Markdown** by the model and returned directly to the user — no docx MCP server is required.
+>
+> If you later want `.docx` output, add a docx MCP server under `mcp.servers`. Note (verified 2026-06-03) that no existing docx MCP server has a native `{placeholder}` template engine; the closest options are [`@knorq/docx-mcp-server`](https://www.npmjs.com/package/@knorq/docx-mcp-server) (npx, active — copy template + find/replace each `{field}`) or building a tiny stdio MCP server around [`docxtpl`](https://pypi.org/project/docxtpl/) for robust `{{field}}` filling.
 
 ### Ports
 
 | Service | Host | Default Port | Env Variable |
 |---------|------|-------------|--------------|
 | Smart Classroom API | smart-classroom machine | 8000 | — |
-| MCP Server | smart-classroom machine | 8100 | `MCP_SERVER_PORT` |
-| vLLM (LLM Service) | OpenClaw/GPU machine | 9905 | — |
+| MCP Server (SSE) | smart-classroom machine | 8100 | `MCP_SERVER_PORT` |
+| OVMS (LLM Service, `/v3`) | Intel GPU machine | 8000 | `--rest_port` |
+
+> Smart Classroom API and OVMS both default to `8000`. If you run them on the **same host**, change one (e.g. OVMS `--rest_port 9000` and set the provider `baseUrl` to `http://<host>:9000/v3`) to avoid a clash.
