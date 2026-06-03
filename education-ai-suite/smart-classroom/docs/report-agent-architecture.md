@@ -8,7 +8,7 @@
 │                                                                                 │
 │  ┌─── Provider (云端) ──────────────┐  ┌─── Provider (本地) ──────────────────┐│
 │  │  Cloud LLM (GPT-4o / Claude)     │  │  Smart Classroom /v1/chat/completions ││
-│  │  精准意图识别 + Skill 选择       │  │  Qwen3-8B 意图识别 + Skill 选择     ││
+│  │  精准意图识别 + Skill 选择       │  │  本地 Qwen 意图识别 + Skill 选择    ││
 │  └───────────────────────────────────┘  └────────────────────────────────────┘│
 │                                                                                 │
 │  Skills (SKILL.md) — 教 LLM 调用哪个 API:                                      │
@@ -49,7 +49,7 @@
 │  └── POST /lesson-prep/chat  ← 备课Agent (future)                              │
 │                                                                                 │
 │  Report Agent:                                                                  │
-│  ├── Local 8B LLM (Qwen3-8B, OpenVINO INT8)                                   │
+│  ├── Local LLM (Qwen, OpenVINO INT8, 可配置 LLM_MODEL_PATH)                  │
 │  ├── 只读取已有数据 (ReAct) + 分析推理 + 文本生成                               │
 │  ├── 工具自动计算统计指标 (语速、提问次数、密度等)                               │
 │  ├── 支持 Word 模板报告生成 (.docx)                                             │
@@ -419,7 +419,7 @@ Header.tsx
 ## Model Lifecycle
 
 ```
-Qwen3-8B (OpenVINO INT8) 作为独立服务运行 (port 9905):
+本地 Qwen (OpenVINO INT8，模型由 LLM_MODEL_PATH 指定) 作为独立服务运行 (port 9905):
 
   LLM Service (llm_serving/app.py):
     - 启动时加载模型到 GPU，常驻内存
@@ -849,7 +849,7 @@ OpenClaw 是可选的云端编排层。部署后提供更精准的意图识别�
 ### Prerequisites
 
 - Node.js 22.19+ 或 Node 24
-- 至少一个 LLM Provider（云端 API key 或 Smart Classroom 本地 Qwen3-8B）
+- 至少一个 LLM Provider（云端 API key 或 Smart Classroom 本地 Qwen 服务）
 - Smart Classroom 服务已启动（`localhost:8000`，LLM service on `:9905`）
 
 ### Step 1: 安装 OpenClaw
@@ -867,34 +867,46 @@ OPENAI_API_KEY=sk-...   # 云端时用 (纯本地时可不配)
 ```
 
 编辑 `~/.openclaw/openclaw.json`:
-```json
+
+#### 模式 1: 纯本地（推荐，无需云端 API key）
+
+本地模型作为 primary，所有对话和 agent 都跑在本地 Qwen 上。
+
+```json5
 {
   "gateway": {
     "mode": "local",
     "bind": "loopback",
-    "auth": {
-      "mode": "token",
-      "token": "your-secret-token"
-    }
+    "auth": { "mode": "token", "token": "your-secret-token" }
   },
   "models": {
     "mode": "merge",
     "providers": {
-      "openai": {},
       "smart-classroom": {
-        "baseUrl": "http://127.0.0.1:9905",
+        // ⚠️ baseUrl 必须带 /v1，本地服务只暴露 /v1/chat/completions
+        "baseUrl": "http://127.0.0.1:9905/v1",
         "apiKey": "local",
         "api": "openai-completions",
-        "models": []
+        // ⚠️ models 不能为空：自定义 OpenAI-compatible provider 必须显式声明模型
+        // id 必须与服务返回的模型名一致（GET /health 或 /v1/models 返回的 model 字段，
+        // 即 os.path.basename(LLM_MODEL_PATH)）
+        "models": [
+          {
+            "id": "Qwen_Qwen2.5-7B-Instruct_int8",
+            "name": "Qwen2.5-7B-Instruct (OpenVINO INT8)",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 5120
+          }
+        ]
       }
     }
   },
   "agents": {
     "defaults": {
-      "model": {
-        "primary": "openai/gpt-4o",
-        "fallbacks": ["smart-classroom/Qwen3-8B"]
-      },
+      "model": { "primary": "smart-classroom/Qwen_Qwen2.5-7B-Instruct_int8" },
       "skipBootstrap": true
     },
     "list": [
@@ -902,26 +914,101 @@ OPENAI_API_KEY=sk-...   # 云端时用 (纯本地时可不配)
         "id": "classroom",
         "default": true,
         "workspace": "~/.openclaw/workspace-classroom",
-        "model": {
-          "primary": "openai/gpt-4o",
-          "fallbacks": ["smart-classroom/Qwen3-8B"]
-        },
+        "model": { "primary": "smart-classroom/Qwen_Qwen2.5-7B-Instruct_int8" },
         "identity": {
           "name": "学情助手",
           "theme": "classroom analysis assistant",
           "emoji": "📊"
         },
-        "tools": {
-          "allow": ["web_fetch", "session_status"]
-        }
+        // skills: 声明该 agent 可用哪些 skill（SKILL.md）。
+        // skill 本身靠拷进 workspace/skills/ 自动加载（见 Step 3），这里只控制可见性。
+        // 省略此字段 = 该 agent 可用全部已加载的 skill。
+        "skills": ["classroom-report", "classroom-homework", "classroom-lesson-prep"],
+        // tools.allow: 控制的是 OpenClaw 内置工具（web_fetch 等），与 skill 无关。
+        // 纯学情分析不需要联网可删除此字段（默认放开全部内置工具）。
+        "tools": { "allow": ["web_fetch"] }
       }
     ]
   }
 }
 ```
 
-> **注意**: 本地 fallback 直接使用 Smart Classroom 的 LLM service (`localhost:9905/v1/chat/completions`)，
-> 复用已加载的 Qwen3-8B 模型，无需额外模型服务。
+> **Skill ≠ Tool（易混淆）**:
+> - **Skill**（`classroom-report` 等 SKILL.md）通过 `skills` 字段控制可见性，靠拷进 `workspace/skills/` 自动加载。
+> - **Tool**（`web_fetch` 等内置工具）通过 `tools.allow` 控制。
+> - 两者是独立机制，**skill 不在 `tools.allow` 里加载**。
+
+#### 模式 2: 云端 primary + 本地 fallback
+
+需要更精准意图识别时，用云端模型做 primary，本地 Qwen 作为降级。需配置 `OPENAI_API_KEY`。
+
+```json5
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      // openai 是 OpenClaw 内置 provider（pi-ai catalog），模型目录自带，
+      // 所以空 {} 即可（甚至可整块省略，只要环境有 OPENAI_API_KEY）。
+      "openai": {},
+      // smart-classroom 是自定义 provider，OpenClaw 不认识它的模型，
+      // 因此必须显式写全 baseUrl / api / models。
+      "smart-classroom": {
+        "baseUrl": "http://127.0.0.1:9905/v1",
+        "apiKey": "local",
+        "api": "openai-completions",
+        "models": [
+          { "id": "Qwen_Qwen2.5-7B-Instruct_int8", "name": "Qwen2.5-7B-Instruct (OpenVINO INT8)", "input": ["text"], "contextWindow": 32768, "maxTokens": 5120 }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/gpt-4o",
+        "fallbacks": ["smart-classroom/Qwen_Qwen2.5-7B-Instruct_int8"]
+      },
+      "skipBootstrap": true
+    }
+  }
+}
+```
+
+> **配置要点（易踩坑）**:
+> 1. **`models` 不能为空** — 自定义 OpenAI-compatible provider 必须在 `models` 里至少声明一个 `{id: ...}`，否则模型引用无法解析，fallback 形同虚设。
+> 2. **`baseUrl` 必须带 `/v1`** — 本地服务只暴露 `POST /v1/chat/completions`（见 `llm_serving/app.py`），对 `api: "openai-completions"` 需写成 `http://127.0.0.1:9905/v1`。
+> 3. **模型 `id` 必须与服务返回一致** — 服务返回 `os.path.basename(LLM_MODEL_PATH)`（如 `Qwen_Qwen2.5-7B-Instruct_int8`），不是 `Qwen3-8B` 这类别名。换模型时同步更新此处。
+> 4. **纯本地把本地模型设为 primary** — 否则没有 `OPENAI_API_KEY` 时会先尝试云端再降级，既慢又易报错。
+
+#### provider 注册 vs primary/fallback 选择
+
+`models.providers` 和 `agents.*.model` 是**两层解耦**的概念：
+
+| | 作用 | 说明 |
+|---|------|------|
+| `models.providers` | **注册哪些 provider 可用** | 只是"开门"，注册了不代表会被用到 |
+| `agents.*.model.primary` | **该 agent 实际用哪个模型**（必填） | 真正"点菜" |
+| `agents.*.model.fallbacks` | primary 失败时按序降级（可选） | 不写则只用 primary |
+
+要点：
+- **provider 注册 ≠ 会被使用**。即使 `providers` 里配了 `openai`，只要 `primary` 填的是 `smart-classroom/Qwen_...` 且没写 `fallbacks`，就**永远只走本地**，openai 闲置不影响。
+- **`fallbacks` 触发的是 provider/model 级失败**（模型不可用 / 报错 / 超时），不是负载均衡；正常永远走 primary，失败才往后试。
+- **纯本地最简写法**：只写 `primary: "smart-classroom/Qwen_..."`，不写 `fallbacks`，甚至可把 `"openai": {}` 整块从 `providers` 删掉，更干净。
+
+```json5
+// 纯本地最简：永远只走本地，无需 openai、无需 fallbacks
+"agents": {
+  "defaults": {
+    "model": { "primary": "smart-classroom/Qwen_Qwen2.5-7B-Instruct_int8" }
+  }
+}
+```
+
+> **⚠️ Tool calling 限制**: 本地 LLM service (`llm_serving/app.py`) **不支持原生 function/tool calling** —
+> `ChatCompletionRequest` 没有 `tools` 字段，请求里的 `tools` 会被忽略，服务只做 `apply_chat_template` + 文本生成。
+> OpenClaw 路由到 agent / 加载 SKILL.md 是靠把 skill 内容写进 prompt、让模型以**文本形式**输出工具调用，再由 OpenClaw 侧解析。
+> 7B 模型在这种 text-based tool-call 上稳定性有限（OpenClaw 文档也警告过 OpenAI-compatible `/v1` 模式下 tool calling 不可靠，
+> 模型可能把工具 JSON 当普通正文输出）。简单聊天不受影响；若发现路由偶尔失败或工具调用被当正文吐出，根因在此，而非 JSON 配置。
 
 ### Step 3: 添加 Skills
 
@@ -973,6 +1060,50 @@ curl -X POST http://localhost:8000/report/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "学生参与度怎么样", "output_format": "chat"}'
 ```
+
+### 模型如何选择 Skill / Agent 路由
+
+OpenClaw 里有两个层面，被"选中"的方式完全不同，别混淆：
+
+| 层面 | 怎么被选中 | 谁决定 |
+|------|-----------|--------|
+| **Agent**（`agents.list` 里的 `classroom`） | **确定性路由**（channel / bindings 配置） | host 配置，模型不参与 |
+| **Skill**（`classroom-report` / `homework` / `lesson-prep`） | **模型读 `description` 自行判断** | 模型 |
+
+> 注意：本架构里的"report / homework / lesson-prep 三个 Agent"，在 OpenClaw 侧
+> **是同一个 `classroom` agent 下的三个 skill**。所以"模型识别该用哪个 Agent"，
+> 本质是"模型识别该用哪个 skill"。
+
+**模型选 skill 的流程**：
+1. 启动时，OpenClaw 扫描 `workspace/skills/`，把每个 skill 的 **`name` + `description`**（仅元数据，非全文）注入系统 prompt。
+2. 用户提问时，模型根据各 skill 的 `description` 和 SKILL.md 里的 **"When to Use / Trigger Phrases"** 判断该用哪个。
+3. 选中后，OpenClaw 才把该 SKILL.md **完整正文**加载进上下文，模型按其中 "How to Call" 指示调用 `POST /report/chat` 等接口。
+
+**因此识别准确率取决于 SKILL.md 的 `description` 写得是否互斥、清晰**——这是提示工程，不是 JSON 配置：
+- ✅ classroom-report → "课后：生成学情报告、分析参与度、出测验题"
+- ✅ classroom-homework → "批改/讲解作业、统计错题"（避免出现 "课堂分析" 这类与 report 重叠的词）
+- ✅ classroom-lesson-prep → "课前：备课、生成教案、教学设计"
+
+> ⚠️ **本地 7B 的限制**：skill 选择本质是 tool/function calling。本地服务不支持原生 tool calling
+> （见前文），OpenClaw 靠文本提示让模型输出选择。skill 少、`description` 区分度高时 7B 基本能选对；
+> skill 多且描述含糊重叠时容易选错。多 skill 场景建议优先用模式 2（云端 primary）做意图识别。
+
+### 如何访问 / 切换多个 Agent
+
+如果 `agents.list` 里配了多个 agent（不是 skill），访问哪一个取决于**入口**——agent 选择是确定性的，**不靠模型语义判断**：
+
+| 入口 | 切换 / 路由方式 |
+|------|----------------|
+| 本地 TUI / CLI（`openclaw chat`） | `/agent <id>` 或 `/agents` 选择；快捷键 `Ctrl+G` 打开 agent picker；也可 `/session agent:<id>:main` 直接跳到另一个 agent 的会话。**不切换则进 `default: true` 的 agent。** |
+| 外部 channel（Slack / Telegram / Discord…） | 靠 `bindings` 按**消息来源**（channel / account / 群）自动路由，用户无感。例：`openclaw agents bind --agent homework-agent --bind telegram:ops` |
+| broadcast 组 | 同一条消息让**多个 agent 并行响应**（不是选一个）：`broadcast: { strategy: "parallel", "<peer>": ["classroom", "homework-agent"] }` |
+
+外部 channel 的 binding 匹配优先级（高 → 低）：精确 peer → 父 peer（线程继承）→ Guild+roles → Guild → Team → Account → Channel → **默认 agent**。
+
+> **关键判断：多 agent ≠ 语义分流。**
+> - 想让用户随便问、系统**自动分流**到 report / homework / lesson-prep → 用 **skill 层**（单 agent + 多 skill，模型读 `description` 自动选），**不需要第二个 agent**。
+> - 本地 `openclaw chat` 没有外部 channel，第二个 agent 只能靠 `/agent` **手动切**——意味着用户得自己知道该用哪个，违背"自动识别"的初衷。
+> - **第二个 agent 仅在需要"隔离"时才有意义**：不同人设 / workspace / 模型 / 鉴权 / 会话历史。例如"对外客服（云端大模型）" vs "内部学情（本地 Qwen）"各自独立，通常配合不同 channel binding，而非手动切换。
 
 ### 数据隐私
 
