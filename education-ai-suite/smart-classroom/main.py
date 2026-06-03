@@ -20,6 +20,8 @@ from starlette.responses import FileResponse
 from pathlib import Path
 from components.va.media_service import MediaService
 from utils.config_loader import config
+from mcp_server.server import mcp as mcp_server
+import threading
 
 
 logger = logging.getLogger(__name__)
@@ -108,26 +110,21 @@ if __name__ == "__main__":
 
     #system_check()
     RuntimeConfig.ensure_config_exists()
-    ensure_model()
-
-    # Start LLM as a persistent service instead of loading per-request
-    start_llm_service()
-
-    # Wait for LLM service to be ready before proceeding
-    from services.llm_serving.client import LLMServiceClient
-    llm_client = LLMServiceClient(
-        model_path=get_model_path(),
-        base_url=f"http://127.0.0.1:{LLM_SERVICE_PORT}",
-    )
-    llm_client.wait_until_ready(timeout=600)
 
     preload_models()
 
     media_service = MediaService()
     media_service.launch_server()
 
+    # Start MCP server
+    MCP_PORT = int(os.environ.get("MCP_SERVER_PORT", "8100"))
+    threading.Thread(
+        target=lambda: mcp_server.run(transport="sse", host="0.0.0.0", port=MCP_PORT),
+        daemon=True,
+    ).start()
+    logger.info(f"MCP server started on port {MCP_PORT}")
+
     def _cleanup(signum, frame):
-        stop_llm_service()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _cleanup)
@@ -135,7 +132,4 @@ if __name__ == "__main__":
 
     import uvicorn
     logger.info("App started, Starting Server...")
-    try:
-        uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
-    finally:
-        stop_llm_service()
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
