@@ -114,7 +114,6 @@ def get_teaching_stats(session_id: str) -> dict:
         session_id: The session identifier (directory name).
     """
     import re
-    import json
 
     session_dir = os.path.join(_get_sessions_dir(), session_id)
     stats = {}
@@ -123,41 +122,40 @@ def get_teaching_stats(session_id: str) -> dict:
     teacher_path = os.path.join(session_dir, "teacher_transcription.txt")
     if os.path.exists(teacher_path):
         with open(teacher_path, "r", encoding="utf-8") as f:
-            content = f.read()
+            lines = [l.strip() for l in f.read().strip().split("\n") if l.strip()]
 
-        lines = [l.strip() for l in content.strip().split("\n") if l.strip()]
         teacher_speaking_sec = 0
-        total_chars = 0
-        question_count = 0
+        teacher_chars = 0
+        teacher_question_count = 0
 
         for line in lines:
             match = re.match(r"\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]\s*(.*)", line)
-            if match:
-                start = float(match.group(1))
-                end = float(match.group(2))
-                text = match.group(3)
-                teacher_speaking_sec += (end - start)
-                total_chars += len(text)
-                if text.endswith("？") or text.endswith("?"):
-                    question_count += 1
+            if not match:
+                continue
+            start = float(match.group(1))
+            end = float(match.group(2))
+            text = match.group(3)
+            teacher_speaking_sec += (end - start)
+            teacher_chars += len(text)
+            if text.endswith("？") or text.endswith("?"):
+                teacher_question_count += 1
 
         teacher_speaking_min = teacher_speaking_sec / 60.0
-        speaking_speed = round(total_chars / teacher_speaking_min) if teacher_speaking_min > 0 else 0
+        speaking_speed = round(teacher_chars / teacher_speaking_min) if teacher_speaking_min > 0 else 0
 
         stats["teacher_speaking_duration_sec"] = round(teacher_speaking_sec)
         stats["teacher_speaking_duration_min"] = round(teacher_speaking_min, 1)
-        stats["teacher_total_chars"] = total_chars
+        stats["teacher_total_chars"] = teacher_chars
         stats["teacher_speaking_speed_chars_per_min"] = speaking_speed
-        stats["teacher_question_count"] = question_count
+        stats["teacher_question_count"] = teacher_question_count
         stats["teacher_sentence_count"] = len(lines)
 
     # --- Class duration from content_segmentation_transcription.txt ---
     cs_path = os.path.join(session_dir, "content_segmentation_transcription.txt")
     if os.path.exists(cs_path):
         with open(cs_path, "r", encoding="utf-8") as f:
-            cs_content = f.read()
+            cs_lines = f.read().strip().split("\n")
 
-        cs_lines = cs_content.strip().split("\n")
         last_end = 0
         for line in reversed(cs_lines):
             match = re.match(r"\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]", line.strip())
@@ -172,25 +170,6 @@ def get_teaching_stats(session_id: str) -> dict:
             stats["teacher_speaking_ratio"] = round(
                 stats["teacher_speaking_duration_sec"] / last_end * 100, 1
             )
-
-    # --- Student engagement from va/class_statistics.json ---
-    va_path = os.path.join(session_dir, "va", "class_statistics.json")
-    if os.path.exists(va_path):
-        with open(va_path, "r", encoding="utf-8") as f:
-            va_data = json.loads(f.read())
-
-        student_count = va_data.get("student_count", 0)
-        raise_count = va_data.get("raise_up_count", 0)
-        stand_count = va_data.get("stand_count", 0)
-
-        stats["student_count"] = student_count
-        stats["hand_raise_count"] = raise_count
-        stats["stand_count"] = stand_count
-
-        if student_count > 0:
-            ratio = (raise_count + stand_count) / student_count
-            stats["interactions_per_student"] = round(ratio, 2)
-            stats["hand_raise_avg"] = round(raise_count / student_count, 1)
 
     if not stats:
         return {"error": "No data files found for this session", "session_id": session_id}

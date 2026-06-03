@@ -45,9 +45,8 @@ The classroom pipeline produces these files:
 
 | File | Content | Format |
 |------|---------|--------|
-| `transcription.txt` | Full ASR transcription with timestamps | `[start - end] text` per line |
+| `content_segmentation_transcription.txt` | Full transcription with timestamps and speaker roles | `[start - end] Role: text` per line |
 | `teacher_transcription.txt` | Teacher-only speech with timestamps | `[start - end] text` per line |
-| `content_segmentation_transcription.txt` | Content-segmented transcription | `[start - end] text` per line |
 | `summary.md` | Class content summary | Markdown |
 | `mindmap.mmd` | Knowledge structure mind map | Mermaid or JSON |
 | `topics.json` | Topic segmentation with time ranges | JSON array |
@@ -147,19 +146,22 @@ When user asks a specific question about classroom data:
 
 When user asks to generate a report, always output a .docx file. Determine whether a custom template is provided:
 
+#### Data collection (same for both cases)
+
+1. Call `get_teaching_stats` for teacher statistics (speaking speed, duration, question count, class duration)
+2. Call `read_session_files` for content and engagement data (`summary.md`, `topics.json`, `mindmap.mmd`, `va/class_statistics.json`)
+
 #### With Custom Template (user uploaded a .docx template)
 
-1. Use the docx tool to parse the uploaded template — extract section headings and `{placeholder}` fields
-2. Call `read_session_files` to get all available classroom data
-3. For each placeholder field in the template, generate appropriate content based on the classroom data
-4. Use the docx tool to fill the template with the generated content and output a .docx file
+3. Use the docx tool to parse the uploaded template — extract section headings and `{placeholder}` fields
+4. Fill all placeholder fields based on the collected data
+5. Use the docx tool to generate the .docx file
 
 #### Without Custom Template (use default template)
 
-Use the default template structure below:
-1. Call `get_teaching_stats` for numerical fields (duration, speed, question count, engagement)
-2. Call `read_session_files` for content fields (read `summary.md`, `topics.json`, `mindmap.mmd`)
-3. Fill all `{placeholder}` fields and generate the .docx file
+3. Use the default template structure below
+4. Fill all `{placeholder}` fields based on the collected data
+5. Use the docx tool to generate the .docx file
 
 <details>
 <summary>Default template — Chinese</summary>
@@ -253,18 +255,12 @@ VI. Recommendations
 
 #### Field Filling Rules
 
-- Fill fields ONLY with data from the session files. If data is unavailable for a field, fill with "暂无数据" (Chinese) or "Data not available" (English).
-- `{duration}`: Calculate from transcription timestamps (last end - first start).
-- `{question_count}`: Count lines ending with `?` or `？` in `teacher_transcription.txt`.
-- `{speaking_speed}`: total_characters / speaking_duration_minutes from `teacher_transcription.txt`.
-- `{hand_raise_count}`: From `va/class_statistics.json` → `raise_up_count`.
-- `{attendance}`: From `va/class_statistics.json` → `student_count`.
-- `{keywords}`: Extract key terms from `summary.md` or `topics.json`.
-- `{mindmap_summary}`: Summarize structure from `mindmap.mmd`.
-- `{engagement_trend}`, `{low_engagement_period}`: Analyze from content segmentation density.
-- `{recommendations}`: Generate 2-3 actionable suggestions based on all collected data.
-- `{school_name}`, `{class_name}`, `{teacher_name}`, `{course_name}`, `{collection_terminal}`: Fill from session metadata or context if available, otherwise leave blank.
-- `{report_time}`: Current date and time when generating the report.
+- Fill fields ONLY with data from `get_teaching_stats` results and session files. NEVER invent data.
+- If data is unavailable for a field, fill with "暂无数据" (Chinese) or "Data not available" (English).
+- Numerical fields (duration, speed, counts): use values directly from `get_teaching_stats`.
+- Content fields (summaries, keywords, recommendations): extract or generate from `summary.md`, `topics.json`, `mindmap.mmd`.
+- Engagement fields (trends, participation): derive from `va/class_statistics.json`.
+- Metadata fields (school name, teacher name, time): fill from user-provided context, otherwise leave blank.
 
 ## Rules
 

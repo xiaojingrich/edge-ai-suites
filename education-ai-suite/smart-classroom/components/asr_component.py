@@ -255,7 +255,7 @@ class ASRComponent(PipelineComponent):
                     )
 
                     full_timestamped_lines.append(
-                        f"[{start} - {end}]: {text}"
+                        f"[{start} - {end}] {speaker_label}: {text}"
                     )
 
                 StorageManager.save(
