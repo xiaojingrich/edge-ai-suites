@@ -111,6 +111,10 @@ if __name__ == "__main__":
     #system_check()
     RuntimeConfig.ensure_config_exists()
 
+    # Start the persistent LLM serving subprocess (port 9905) before preloading,
+    # so the OpenVINO model loads in parallel while other models are prepared.
+    start_llm_service()
+
     preload_models()
 
     media_service = MediaService()
@@ -125,6 +129,7 @@ if __name__ == "__main__":
     logger.info(f"MCP server started on port {MCP_PORT}")
 
     def _cleanup(signum, frame):
+        stop_llm_service()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _cleanup)

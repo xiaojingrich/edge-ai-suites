@@ -6,7 +6,7 @@
 ┌──────────────┐       ┌────────────────────┐       ┌──────────────────────┐
 │   OpenClaw   │──────▶│  OVMS              │       │  MCP Server          │
 │              │◀──────│  (Qwen2.5-7B, OV)  │       │  (smart-classroom)   │
-│  - Skill     │       │  :8000/v3          │       │  :8100 (SSE)         │
+│  - Skill     │       │  :9000/v3          │       │  :8100 (SSE)         │
 │  - MCP Client│──────────────────────────────────▶│  - list_sessions     │
 │  - ReAct Loop│◀──────────────────────────────────│  - read_session_files│
 │              │       └────────────────────┘       │  - get_teaching_stats│
@@ -107,7 +107,7 @@ OpenClaw matches this to the `classroom-report` skill and starts the function ca
 OpenClaw sends to OVMS:
 
 ```json
-POST http://<ovms-host>:8000/v3/chat/completions
+POST http://<ovms-host>:9000/v3/chat/completions
 
 {
   "model": "Qwen2.5-7B-Instruct",
@@ -309,13 +309,13 @@ This produces `models/Qwen/Qwen2.5-7B-Instruct/` with a `graph.pbtxt` containing
 docker run --user $(id -u):$(id -g) -d \
   --device /dev/dri \
   --group-add=$(stat -c "%g" /dev/dri/render* | head -n 1) \
-  --rm -p 8000:8000 \
+  --rm -p 9000:9000 \
   -v $(pwd)/models:/models:rw \
   openvino/model_server:latest-gpu \
   --model_repository_path /models \
   --model_name Qwen2.5-7B-Instruct \
   --model_path /models/Qwen/Qwen2.5-7B-Instruct \
-  --rest_port 8000 \
+  --rest_port 9000 \
   --target_device GPU
 ```
 
@@ -326,7 +326,7 @@ docker run --user $(id -u):$(id -g) -d \
 | Parameter | Purpose |
 |-----------|---------|
 | `--target_device GPU` | Run on Intel GPU (`/dev/dri`). Use `CPU` to run on CPU. |
-| `--rest_port 8000` | REST port; OpenAI-compatible API served at `/v3/...`. |
+| `--rest_port 9000` | REST port; OpenAI-compatible API served at `/v3/...`. |
 | `tool_parser: hermes3` (in `graph.pbtxt`) | Extract `tool_calls` from Qwen2.5/Qwen3 output. **Required for function calling.** |
 | `enable_tool_guided_generation: true` | Push the model to emit tool calls matching the `tools` schema. |
 
@@ -334,10 +334,10 @@ docker run --user $(id -u):$(id -g) -d \
 
 ```bash
 # 1) model ready
-curl http://localhost:8000/v1/config
+curl http://localhost:9000/v1/config
 
 # 2) function calling — note the /v3 path
-curl http://localhost:8000/v3/chat/completions \
+curl http://localhost:9000/v3/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen2.5-7B-Instruct",
@@ -412,7 +412,7 @@ OVMS is a custom OpenAI-compatible provider. Register it under `models.providers
         // OVMS OpenAI-compatible endpoint — MUST end in /v3.
         // OpenClaw's "openai-completions" API sends POST <baseUrl>/chat/completions
         // with a `messages` body (NOT a legacy `prompt` body).
-        "baseUrl": "http://<ovms-host>:8000/v3",
+        "baseUrl": "http://<ovms-host>:9000/v3",
         "apiKey": "${OVMS_API_KEY}",
         "api": "openai-completions",
         "timeoutSeconds": 300,
@@ -480,6 +480,6 @@ OVMS_API_KEY=ovms-local
 |---------|------|-------------|--------------|
 | Smart Classroom API | smart-classroom machine | 8000 | — |
 | MCP Server (SSE) | smart-classroom machine | 8100 | `MCP_SERVER_PORT` |
-| OVMS (LLM Service, `/v3`) | Intel GPU machine | 8000 | `--rest_port` |
+| OVMS (LLM Service, `/v3`) | Intel GPU machine | 9000 | `--rest_port` |
 
-> Smart Classroom API and OVMS both default to `8000`. If you run them on the **same host**, change one (e.g. OVMS `--rest_port 9000` and set the provider `baseUrl` to `http://<host>:9000/v3`) to avoid a clash.
+> OVMS uses `9000` so it never clashes with the Smart Classroom API on `8000`. If you move OVMS to another port, set both `--rest_port` and the provider `baseUrl` (`http://<host>:<port>/v3`) to match.
