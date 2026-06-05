@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # Start MCP server
     MCP_PORT = int(os.environ.get("MCP_SERVER_PORT", "8100"))
     threading.Thread(
-        target=lambda: mcp_server.run(transport="sse", host="0.0.0.0", port=MCP_PORT),
+        target=lambda: mcp_server.run(transport="sse"),
         daemon=True,
     ).start()
     logger.info(f"MCP server started on port {MCP_PORT}")

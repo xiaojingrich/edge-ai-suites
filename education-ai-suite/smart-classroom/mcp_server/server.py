@@ -17,6 +17,8 @@ from utils.runtime_config_loader import RuntimeConfig
 mcp = FastMCP(
     "smart-classroom",
     description="Smart Classroom data and tools for classroom evaluation and analysis",
+    host="0.0.0.0",
+    port=int(os.environ.get("MCP_SERVER_PORT", "8100")),
 )
 
 
