@@ -22,6 +22,7 @@ from components.va.media_service import MediaService
 from utils.config_loader import config
 from mcp_server.server import mcp as mcp_server
 import threading
+import uvicorn
 
 
 logger = logging.getLogger(__name__)
@@ -82,8 +83,6 @@ def start_llm_service():
         bufsize=1,
     )
 
-    import threading
-
     def _log_output():
         for line in _llm_service_process.stdout:
             logger.info(f"[LLM Service] {line.rstrip()}")
@@ -135,6 +134,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _cleanup)
     signal.signal(signal.SIGTERM, _cleanup)
 
-    import uvicorn
     logger.info("App started, Starting Server...")
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)

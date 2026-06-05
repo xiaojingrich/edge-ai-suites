@@ -9,6 +9,7 @@ Started from main.py alongside the main application.
 """
 
 import os
+import re
 
 from mcp.server.fastmcp import FastMCP
 from utils.runtime_config_loader import RuntimeConfig
@@ -120,8 +121,6 @@ def get_teaching_stats(session_id: str) -> dict:
     Args:
         session_id: The session identifier (directory name).
     """
-    import re
-
     session_dir = os.path.join(_get_sessions_dir(), session_id)
     stats = {}
 
