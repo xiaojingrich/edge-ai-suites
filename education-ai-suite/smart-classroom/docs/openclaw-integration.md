@@ -290,7 +290,7 @@ OVMS serves the LLM on Intel GPU/CPU with an OpenAI-compatible API and supports 
 
 #### Export the model with a tool parser
 
-Use the OVMS export script (`demos/common/export_models/export_model.py`) to download/convert the model **and** write a `graph.pbtxt` that includes the tool parser:
+Use the OVMS export script (`https://raw.githubusercontent.com/openvinotoolkit/model_server/refs/tags/v2026.1/demos/common/export_models/export_model.py`) to download/convert the model **and** write a `graph.pbtxt` that includes the tool parser:
 
 ```bash
 python export_model.py text_generation \
@@ -302,6 +302,9 @@ python export_model.py text_generation \
 ```
 
 This produces `models/Qwen/Qwen2.5-7B-Instruct/` with a `graph.pbtxt` containing `tool_parser: "hermes3"` and `enable_tool_guided_generation: true`.
+
+#### Windows Setup
+For windows: `https://docs.openvino.ai/2026/model-server/ovms_docs_deploying_server_baremetal.html`
 
 #### Start OVMS (Docker, Intel GPU)
 
@@ -405,20 +408,64 @@ OVMS is a custom OpenAI-compatible provider. Register it under `models.providers
 
 ```json5
 {
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ovms/Qwen2.5-7B-Instruct"
+      },"skipBootstrap": true
+    },
+    "list": [
+      {
+        "id": "classroom",
+        "default": true,
+        "workspace": "~/.openclaw/skills/workspace-classroom",
+        "model": {
+          "fallbacks": ["smart-classroom/Qwen_Qwen2.5-7B-Instruct_int8"]
+        },
+        "identity": {
+          "name": "Student-Learning-Assistant",
+          "theme": "classroom analysis assistant",
+          "emoji": ""
+        },
+        "skills": ["classroom-report", "classroom-homework", "classroom-lesson-prep"]
+
+      }
+    ]
+  },
+  "mcp": {
+    "servers": {
+      "smart-classroom": {
+        "url": "http://127.0.0.1:8100/sse",
+        "transport": "sse"
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "controlUi": {
+      "allowInsecureAuth": true,
+      "allowedOrigins": [
+        "*"
+      ],
+      "dangerouslyDisableDeviceAuth": true
+    },
+    "auth": {
+      "mode": "token",
+      "token": "token id"
+    }
+  },
   "models": {
     "mode": "merge",
     "providers": {
       "ovms": {
-        // OVMS OpenAI-compatible endpoint — MUST end in /v3.
-        // OpenClaw's "openai-completions" API sends POST <baseUrl>/chat/completions
-        // with a `messages` body (NOT a legacy `prompt` body).
-        "baseUrl": "http://<ovms-host>:9000/v3",
-        "apiKey": "${OVMS_API_KEY}",
+        "baseUrl": "http://127.0.0.1:9000/v3",
+        "apiKey": "ovms-local",
         "api": "openai-completions",
         "timeoutSeconds": 300,
         "models": [
           {
-            // id MUST match OVMS --model_name and the agent model.primary
             "id": "Qwen2.5-7B-Instruct",
             "name": "Qwen2.5-7B-Instruct (OVMS)",
             "reasoning": false,
@@ -428,16 +475,85 @@ OVMS is a custom OpenAI-compatible provider. Register it under `models.providers
             "maxTokens": 8192
           }
         ]
+      },
+      "ollama": {
+        "api": "ollama",
+        "baseUrl": "http://127.0.0.1:11434",
+        "apiKey": "ollama-local",
+        "models": [
+          {
+            "id": "llama3:8b-instruct-q4_0",
+            "name": "llama3:8b-instruct-q4_0",
+            "reasoning": false,
+            "contextWindow": 32768,
+            "maxTokens": 8192,
+            "input": [
+              "text"
+            ]
+          }
+        ]
+      },
+      "kimi-cloud": {
+        "api": "openai-completions",
+        "baseUrl": "https://api.moonshot.cn/v1",
+        "apiKey": "api-key",
+        "models": [
+          {
+            "id": "kimi-k2.5",
+            "name": "Kimi K2.5(?)",
+            "reasoning": true,
+            "contextWindow": 256000,
+            "maxTokens": 4096,
+            "input": [
+              "text",
+              "image"
+            ]
+          }
+        ]
       }
     }
   },
-  "agents": {
-    "defaults": {
-      "model": { "primary": "ovms/Qwen2.5-7B-Instruct" },
-      "skipBootstrap": true
+  "plugins": {
+    "allow": [
+      "ollama",
+      "openai",
+      "memory-core",
+      "msteams"
+    ],
+    "entries": {
+      "ollama": {
+        "enabled": true
+      },
+      "openai": {
+        "enabled": true
+      },
+      "memory-core": {
+        "config": {
+          "dreaming": {
+            "enabled": true
+          }
+        }
+      }
     }
+  },
+  "channels": {
+    "msteams": {
+      "enabled": true,
+      "appId": "${MSTEAMS_APP_ID}",
+      "appPassword": "${MSTEAMS_APP_PASSWORD}",
+      "tenantId": "${MSTEAMS_TENANT_ID}",
+      "webhook": {
+        "port": 3978,
+        "path": "/api/messages"
+      }
+    }
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.4.14",
+    "lastTouchedAt": "2026-04-29T01:36:00.139Z"
   }
 }
+
 ```
 
 Set `OVMS_API_KEY` in `~/.openclaw/.env` (any non-empty value if OVMS does not enforce auth):

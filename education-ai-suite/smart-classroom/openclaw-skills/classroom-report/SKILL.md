@@ -31,13 +31,7 @@ All data access goes through the `smart-classroom` MCP server. Reports are retur
 |------|---------|
 | `list_sessions` | List all sessions with their available files |
 | `read_session_files(session_id, filenames)` | Read one or more files from a session in a single call |
-| `get_teaching_stats(session_id)` | Get pre-computed statistics: teacher speaking speed, duration, question count, class duration, student engagement |
-
-### Workflow
-
-1. Call `list_sessions` to find the target session and see what files are available
-2. Call `read_session_files` with all the filenames you need (one call, multiple files)
-3. Analyze the data and respond
+| `get_teaching_stats(session_id)` | Pre-computed numbers parsed server-side from the (large) transcripts, so you never load them: `teacher_speaking_duration_min`, `teacher_speaking_speed_chars_per_min`, `teacher_question_count`, `teacher_sentence_count`, `class_duration_min`, `teacher_speaking_ratio`. Teacher-side only — student engagement comes from `va/class_statistics.json`. |
 
 ## Data Files
 
@@ -66,33 +60,30 @@ The classroom pipeline produces these files:
 }
 ```
 
-### Transcription Line Format
-
-```
-[start_seconds - end_seconds] spoken text
-```
-
 ## Analysis Capabilities
 
 ### 1. Student Engagement Analysis
 
-Source: `va/class_statistics.json`, `content_segmentation_transcription.txt`
+Source: `va/class_statistics.json` (read via `read_session_files`). It provides `student_count`, `raise_up_count`, `stand_count`, `stand_reid`.
 
 - **Engagement score** = (raise_up_count + stand_count) / student_count
   - >= 3.0 → High
   - >= 1.0 → Medium
   - < 1.0 → Low
-- **Active students**: From `stand_reid`, count entries with count >= 2
-- **Temporal patterns**: Segment density per 5-minute period from content segmentation — higher density = more active
+- **Active students**: `stand_reid` entries with count >= 2
+- **Talk balance** (optional context): `teacher_speaking_ratio` from `get_teaching_stats` — a lower teacher ratio means more student talk time.
+- **Per-period engagement** (high/low engagement windows): not available from these counts. If the user has not supplied it, mark it as no data — do not fabricate a timeline.
 
 ### 2. Teacher Behavior Analysis
 
-Source: `teacher_transcription.txt`
+Source: `get_teaching_stats` — all of the metrics below are pre-computed from `teacher_transcription.txt` on the server, so you get the numbers directly:
 
-- **Speaking duration**: Sum all (end - start) from timestamps
-- **Speaking speed**: total_characters / speaking_duration_minutes (chars/min)
-- **Question frequency**: Count lines ending with `?` or `？`
-- **Speaking ratio**: teacher_speaking_duration / total_class_duration
+- **Speaking duration**: `teacher_speaking_duration_min`
+- **Speaking speed**: `teacher_speaking_speed_chars_per_min`
+- **Question frequency**: `teacher_question_count`
+- **Speaking ratio**: `teacher_speaking_ratio`
+
+(For questions that need the teacher's actual words rather than these numbers, read `teacher_transcription.txt` directly — see *Answer Questions*.)
 
 ### 3. Content Analysis
 
@@ -105,7 +96,7 @@ Source: `summary.md`, `mindmap.mmd`, `topics.json`
 
 ### 4. Quiz Generation
 
-Source: `summary.md` or `transcription.txt`
+Source: `summary.md` (preferred — it is compact and covers the lesson). Fall back to a raw transcript only when `summary.md` is missing, and read it in its own turn rather than together with a full report.
 
 Generate 5 multiple-choice questions:
 - 4 options (A/B/C/D) each, with correct answer marked
@@ -148,8 +139,12 @@ When user asks to generate a report, output the report as **Markdown** following
 
 #### Data collection
 
-1. Call `get_teaching_stats` for teacher statistics (speaking speed, duration, question count, class duration)
-2. Call `read_session_files` for content and engagement data (`summary.md`, `topics.json`, `mindmap.mmd`, `va/class_statistics.json`)
+A report needs **summarized numbers and content**, not raw speech. Collect exactly these two sources — together they are compact enough to fit the model's context:
+
+1. Call `get_teaching_stats` once — it returns the transcript-derived teacher numbers (speaking duration, speed, question count, class duration, teacher speaking ratio) without loading any transcript.
+2. Call `read_session_files` for the remaining compact data: `summary.md`, `topics.json`, `mindmap.mmd`, `va/class_statistics.json` (the video-analytics counts the template needs for hand-raising / attendance / engagement).
+
+The raw transcripts (`transcription.txt`, `content_segmentation_transcription.txt`) are not part of report collection — they are reserved for the *Answer Questions* flow, where the user needs the actual spoken words.
 
 #### Compose the report
 
@@ -250,15 +245,17 @@ VI. Recommendations
 #### Field Filling Rules
 
 - Fill fields ONLY with data from `get_teaching_stats` results and session files. NEVER invent data.
-- If data is unavailable for a field, fill with "暂无数据" (Chinese) or "Data not available" (English).
-- Numerical fields (duration, speed, counts): use values directly from `get_teaching_stats`.
+- If a value is unavailable, fill with "暂无数据" (Chinese) or "Data not available" (English). Do not guess.
+- Teaching-behavior fields (`duration`, `teaching_duration`, `speaking_speed`, `question_count`): use `get_teaching_stats` values directly.
+- Engagement fields (`attendance`, `hand_raise_count`, `hand_raise_avg`): from `va/class_statistics.json` (`student_count`, `raise_up_count`, `stand_count`). `teacher_speaking_ratio` gives talk balance.
 - Content fields (summaries, keywords, recommendations): extract or generate from `summary.md`, `topics.json`, `mindmap.mmd`.
-- Engagement fields (trends, participation): derive from `va/class_statistics.json`.
 - Metadata fields (school name, teacher name, time): fill from user-provided context, otherwise leave blank.
+- Fields with no source in the available data — `{engagement_trend}`, `{low_engagement_period}` (per-period engagement) and `{difficulty_mention_count}` (full-transcript counting) — fill with "暂无数据" / "Data not available" unless the user supplies them. Never estimate or fabricate them.
 
 ## Rules
 
 - ONLY use data from actual files read via MCP tools. NEVER invent or fabricate statistics.
+- For reports, get transcript-derived numbers from `get_teaching_stats`; read the raw transcripts only when a question needs the actual spoken words.
 - If a file does not exist or is empty, mark that section as unavailable.
 - Keep full reports between 400-800 words.
 - Be professional and objective.
