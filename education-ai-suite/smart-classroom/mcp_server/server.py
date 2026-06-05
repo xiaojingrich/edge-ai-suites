@@ -35,6 +35,20 @@ def _get_sessions_dir() -> str:
 # ============================================================
 
 
+IGNORED_DIRS = {"audio"}
+
+RELEVANT_FILES = (
+    "summary.md",
+    "mindmap.mmd",
+    "topics.json",
+    "transcription.txt",
+    "teacher_transcription.txt",
+    "content_segmentation_transcription.txt",
+    "class_report.md",
+    "va/class_statistics.json",
+)
+
+
 @mcp.tool()
 def list_sessions() -> dict:
     """List all available classroom sessions with their available data files."""
@@ -42,25 +56,16 @@ def list_sessions() -> dict:
     if not os.path.exists(sessions_dir):
         return {"sessions": [], "error": f"Sessions directory not found: {sessions_dir}"}
 
-    IGNORED_DIRS = {"audio"}
-
     sessions = []
     for entry in sorted(os.listdir(sessions_dir), reverse=True):
         session_path = os.path.join(sessions_dir, entry)
         if not os.path.isdir(session_path) or entry.startswith(".") or entry in IGNORED_DIRS:
             continue
 
-        files = []
-        for fname in os.listdir(session_path):
-            fpath = os.path.join(session_path, fname)
-            if os.path.isfile(fpath):
-                files.append(fname)
-
-        va_dir = os.path.join(session_path, "va")
-        if os.path.isdir(va_dir):
-            for fname in os.listdir(va_dir):
-                if os.path.isfile(os.path.join(va_dir, fname)):
-                    files.append(f"va/{fname}")
+        files = [
+            rel for rel in RELEVANT_FILES
+            if os.path.isfile(os.path.join(session_path, rel))
+        ]
 
         sessions.append({"session_id": entry, "files": files})
 
