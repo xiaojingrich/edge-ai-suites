@@ -29,7 +29,7 @@ All data access goes through the `smart-classroom` MCP server. Reports are retur
 
 | Tool | Purpose |
 |------|---------|
-| `list_sessions` | List all sessions with their available files |
+| `list_sessions` | List all sessions. Each session's files are grouped into `report_files` (compact — use for reports) and `transcript_files` (large raw transcripts — detail Q&A only). |
 | `read_session_files(session_id, filenames)` | Read one or more files from a session in a single call |
 | `get_teaching_stats(session_id)` | Pre-computed numbers parsed server-side from the (large) transcripts, so you never load them: `teacher_speaking_duration_min`, `teacher_speaking_speed_chars_per_min`, `teacher_question_count`, `teacher_sentence_count`, `class_duration_min`, `teacher_speaking_ratio`. Teacher-side only — student engagement comes from `va/class_statistics.json`. |
 
@@ -129,7 +129,7 @@ When user asks to list/show sessions (e.g., "列出session", "有哪些课堂记
 
 When user asks a specific question about classroom data:
 
-- Call `read_session_files` for only the relevant files
+- Call `read_session_files` for only the relevant files. This is the only flow that may read `transcript_files` (the raw transcripts), and only when the question is about the actual spoken words.
 - Answer directly and concisely
 - If data is insufficient, state clearly
 

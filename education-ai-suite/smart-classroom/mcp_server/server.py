@@ -38,21 +38,31 @@ def _get_sessions_dir() -> str:
 
 IGNORED_DIRS = {"audio"}
 
-RELEVANT_FILES = (
+# Compact files used to build a report. Safe to read together.
+REPORT_FILES = (
     "summary.md",
     "mindmap.mmd",
     "topics.json",
+    "va/class_statistics.json",
+)
+
+# Full raw transcripts. Large — only for detail Q&A, never for a report.
+TRANSCRIPT_FILES = (
     "transcription.txt",
     "teacher_transcription.txt",
     "content_segmentation_transcription.txt",
-    "class_report.md",
-    "va/class_statistics.json",
 )
 
 
 @mcp.tool()
 def list_sessions() -> dict:
-    """List all available classroom sessions with their available data files."""
+    """List all available classroom sessions, with each session's files grouped by purpose.
+
+    report_files: compact files for generating a report (read these for a report).
+    transcript_files: large raw transcripts — only for answering questions about the
+    actual spoken words; do NOT load them when generating a report (use get_teaching_stats
+    for transcript-derived numbers instead).
+    """
     sessions_dir = _get_sessions_dir()
     if not os.path.exists(sessions_dir):
         return {"sessions": [], "error": f"Sessions directory not found: {sessions_dir}"}
@@ -63,12 +73,21 @@ def list_sessions() -> dict:
         if not os.path.isdir(session_path) or entry.startswith(".") or entry in IGNORED_DIRS:
             continue
 
-        files = [
-            rel for rel in RELEVANT_FILES
+        report_files = [
+            rel for rel in REPORT_FILES
+            if os.path.isfile(os.path.join(session_path, rel))
+        ]
+        transcript_files = [
+            rel for rel in TRANSCRIPT_FILES
             if os.path.isfile(os.path.join(session_path, rel))
         ]
 
-        sessions.append({"session_id": entry, "files": files})
+        sessions.append({
+            "session_id": entry,
+            "report_files": report_files,
+            "transcript_files": transcript_files,
+            "note": "For a report, read report_files only. transcript_files are large and for detail Q&A only.",
+        })
 
     return {"sessions": sessions}
 
