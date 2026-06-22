@@ -1185,51 +1185,32 @@ export async function csGetTags(): Promise<string[]> {
   });
 }
 
-// ==================== Agent Chat API ====================
-
-export interface PlanStep {
-  action: string;
-  thought: string;
-  llm?: boolean;
-}
-
-export interface AgentChatEvent {
-  type: 'agent_token' | 'agent_thinking' | 'agent_plan' | 'agent_plan_update' | 'agent_step_start' | 'agent_step_done' | 'report_ready' | 'error' | 'done';
+export interface ReportStreamEvent {
+  type: 'token' | 'report_ready' | 'error' | 'done';
   token?: string;
-  message?: string;
-  thought?: string;
-  action?: string;
-  conversationId?: string;
   sessionId?: string;
-  steps?: PlanStep[];
-  index?: number;
+  message?: string;
 }
 
-export async function* streamAgentChat(
-  sessionId: string,
-  message: string,
-  conversationId?: string | null,
-  opts: StreamOptions = {}
-): AsyncGenerator<AgentChatEvent> {
-  const body: Record<string, any> = { message };
-  if (sessionId) body.session_id = sessionId;
-  if (conversationId) body.conversation_id = conversationId;
+export async function* streamGenerateReport(
+  sessionId: string
+): AsyncGenerator<ReportStreamEvent> {
+  const body = { session_id: sessionId, query: '生成一份完整的课堂评估报告' };
 
-  const res = await fetch(`${BASE_URL}/chat`, {
+  const res = await fetch(`${BASE_URL}/report/generate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: opts.signal,
-    cache: 'no-store',
-    keepalive: true,
   });
 
-  if (!res.ok) throw new Error(`Agent chat failed: ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    yield { type: 'error', message: `Report generation failed: ${res.status}` };
+    return;
+  }
 
   const reader = res.body?.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let detectedConversationId: string | undefined;
 
   while (reader) {
     const { value, done } = await reader.read();
@@ -1243,92 +1224,53 @@ export async function* streamAgentChat(
       let chunk: any;
       try { chunk = JSON.parse(trimmed); } catch { continue; }
 
-      if (chunk.conversation_id && !detectedConversationId) {
-        detectedConversationId = chunk.conversation_id;
-      }
-
       if (chunk.error) {
-        yield { type: 'error', message: chunk.error, conversationId: detectedConversationId };
+        yield { type: 'error', message: chunk.error };
         return;
       }
-
-      if (chunk.type === 'thinking') {
-        yield { type: 'agent_thinking', thought: chunk.thought, action: chunk.action, conversationId: detectedConversationId };
-        continue;
-      }
-
-      if (chunk.type === 'plan') {
-        yield { type: 'agent_plan', steps: chunk.steps, conversationId: detectedConversationId };
-        continue;
-      }
-
-      if (chunk.type === 'plan_update') {
-        yield { type: 'agent_plan_update', steps: chunk.steps, conversationId: detectedConversationId };
-        continue;
-      }
-
-      if (chunk.type === 'step_start') {
-        yield { type: 'agent_step_start', index: chunk.index, conversationId: detectedConversationId };
-        continue;
-      }
-
-      if (chunk.type === 'step_done') {
-        yield { type: 'agent_step_done', index: chunk.index, conversationId: detectedConversationId };
-        continue;
-      }
-
       if (chunk.type === 'report_ready') {
-        yield { type: 'report_ready', sessionId: chunk.session_id, conversationId: detectedConversationId };
+        yield { type: 'report_ready', sessionId: chunk.session_id };
         continue;
       }
-
-      const token: string | undefined = chunk.token;
-      if (typeof token === 'string' && token.length > 0) {
-        yield { type: 'agent_token', token, conversationId: detectedConversationId };
+      if (typeof chunk.token === 'string' && chunk.token.length > 0) {
+        yield { type: 'token', token: chunk.token };
       }
     }
   }
-  yield { type: 'done', conversationId: detectedConversationId };
+  yield { type: 'done' };
 }
 
-export interface ConversationPreview {
-  conversation_id: string;
-  created_at: string;
-  preview: string;
-  message_count: number;
+export function getReportDownloadUrl(sessionId: string): string {
+  return `${BASE_URL}/report/${sessionId}/download`;
 }
 
-export async function listConversations(sessionId: string): Promise<ConversationPreview[]> {
-  const res = await fetch(`${BASE_URL}/conversations/${sessionId}`);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.conversations || [];
+export interface TemplatePreview {
+  path: string;
+  is_custom: boolean;
+  sections: { heading: string; level: number; fields: string[] }[];
+  fields: string[];
+  raw_text: string;
 }
 
-export async function getConversationMessages(sessionId: string, conversationId: string): Promise<{role: string; content: string}[]> {
-  const res = await fetch(`${BASE_URL}/conversations/${sessionId}/${conversationId}`);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.messages || [];
+export async function getTemplatePreview(sessionId?: string | null): Promise<TemplatePreview | null> {
+  const params = sessionId ? `?session_id=${sessionId}` : '';
+  const res = await fetch(`${BASE_URL}/report/template/preview${params}`);
+  if (!res.ok) return null;
+  return res.json();
 }
 
-export async function deleteConversation(sessionId: string, conversationId: string): Promise<boolean> {
-  const res = await fetch(`${BASE_URL}/conversations/${sessionId}/${conversationId}`, { method: 'DELETE' });
-  return res.ok;
-}
-
-export interface SessionInfo {
-  session_id: string;
-  has_transcription: boolean;
-  has_report: boolean;
-  has_summary: boolean;
-}
-
-export async function listSessions(): Promise<SessionInfo[]> {
-  const res = await fetch(`${BASE_URL}/sessions`);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.sessions || [];
+export async function uploadReportTemplate(file: File): Promise<{ message: string; path: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${BASE_URL}/report/template/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
+    throw new Error(err.detail || 'Upload failed');
+  }
+  return res.json();
 }
 
 /** Map a MIME type string to a short, display-friendly extension label (e.g. "DOCX"). */

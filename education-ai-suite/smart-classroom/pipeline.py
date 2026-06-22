@@ -8,7 +8,7 @@ from utils.session_manager import generate_session_id
 from components.summarizer_component import SummarizerComponent
 from components.mindmap_component import MindmapComponent
 from components.segmentation.content_segmentation import ContentSegmentationComponent
-from components.report_agent.report_agent import ReportAgent
+from components.report_generator.report_generator import ReportGenerator
 from utils.runtime_config_loader import RuntimeConfig
 from utils.storage_manager import StorageManager
 from utils.markdown_cleaner import markdown_to_plain
@@ -52,7 +52,7 @@ class Pipeline:
 
         self.content_component.model = self.summarizer_pipeline[0].summarizer
 
-        self.report_agent = None  # Lazy init — needs user_query
+        self.report_generator = None
 
 
     def run_transcription(self, input):
@@ -282,8 +282,8 @@ class Pipeline:
         logger.info("Search returned %d result(s) from content-search service.", len(results))
         return results
 
-    def run_report(self, user_query: str = None, prior_observations: list = None, output_format: str = None):
-        """Generate a class evaluation report using the Report Agent."""
+    def run_report(self):
+        """Generate a class evaluation report."""
         project_config = RuntimeConfig.get_section("Project")
         session_dir = os.path.join(
             project_config.get("location"),
@@ -297,19 +297,14 @@ class Pipeline:
                 detail=f"Invalid session id: {self.session_id}, session directory not found.",
             )
 
-        self.report_agent = ReportAgent(
+        self.report_generator = ReportGenerator(
             session_id=self.session_id,
-            user_query=user_query,
-            output_format=output_format,
         )
-        self.report_agent.model = self.summarizer_pipeline[0].summarizer
-
-        if prior_observations:
-            self.report_agent.observations = list(prior_observations)
+        self.report_generator.model = self.summarizer_pipeline[0].summarizer
 
         try:
-            for token in self.report_agent.generate_report():
-                yield token
+            for event in self.report_generator.generate_report():
+                yield event
         except Exception as e:
             logger.error(f"Error during report generation: {e}")
             raise HTTPException(

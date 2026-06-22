@@ -4,6 +4,7 @@ export type Tab = 'transcripts' | 'summary' | 'mindmap';
 export type ProcessingMode = 'audio' | 'video-only' | 'microphone' | null;
 export type AudioStatus = 'idle' | 'checking' | 'ready' | 'recording' | 'processing' | 'transcribing' | 'summarizing' | 'mindmapping' | 'complete' | 'error' | 'no-devices';
 export type VideoStatus = 'idle' | 'ready' | 'starting' | 'streaming' | 'stopping' | 'failed' | 'completed' | 'no-config'| 'playback';
+export type ReportStatus = 'idle' | 'generating' | 'done' | 'error';
 
 export interface SearchResult {
   score: number;
@@ -77,6 +78,9 @@ export interface UIState {
   csHasUploads: boolean;
   csServerFilesExist: boolean;
   csTags: string[];
+  reportStatus: ReportStatus;
+  reportError: string | null;
+  shouldStartReport: boolean;
 }
  
 const initialState: UIState = {
@@ -138,6 +142,9 @@ const initialState: UIState = {
   csHasUploads: false,
   csServerFilesExist: false,
   csTags: [],
+  reportStatus: 'idle',
+  reportError: null,
+  shouldStartReport: false,
 };
 
 const uiSlice = createSlice({
@@ -170,6 +177,9 @@ const uiSlice = createSlice({
       state.searchResults = [];
       state.showSearchResults = false;
       state.timelineHighlight = null;
+      state.reportStatus = 'idle';
+      state.reportError = null;
+      state.shouldStartReport = false;
     },
  
     processingFailed(state) {
@@ -534,6 +544,27 @@ const uiSlice = createSlice({
       state.csServerFilesExist = action.payload;
     },
 
+    startReport(state) {
+      state.reportStatus = 'generating';
+      state.reportError = null;
+      state.shouldStartReport = true;
+    },
+
+    clearReportStartRequest(state) {
+      state.shouldStartReport = false;
+    },
+
+    reportDone(state) {
+      state.reportStatus = 'done';
+      state.shouldStartReport = false;
+    },
+
+    reportFailed(state, action: PayloadAction<string | undefined>) {
+      state.reportStatus = 'error';
+      state.reportError = action.payload || 'Report generation failed';
+      state.shouldStartReport = false;
+    },
+
     clearSearchResults(state) {
       state.searchResults = [];
       state.showSearchResults = false;
@@ -626,6 +657,10 @@ export const {
   setCsHasUploads,
   setCsTags,
   setCsServerFilesExist,
+  startReport,
+  clearReportStartRequest,
+  reportDone,
+  reportFailed,
 } = uiSlice.actions;
  
 export default uiSlice.reducer;

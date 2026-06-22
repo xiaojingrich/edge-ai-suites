@@ -52,7 +52,7 @@ import {
 } from '../../services/api';
 import Toast from '../common/Toast';
 import UploadFilesModal from '../Modals/UploadFilesModal';
-import AgentChatDialog from '../AgentChatDialog';
+import ReportPanel from '../ReportPanel';
 
 interface HeaderBarProps {
   projectName: string;
@@ -91,7 +91,6 @@ const HeaderBar: React.FC<HeaderBarProps> = ({ projectName }) => {
   const hasUploadedVideoFiles = useAppSelector((s) => s.ui.hasUploadedVideoFiles);
   const isPlaybackMode = useAppSelector((s) => s.ui.videoPlaybackMode);
   const [isUploading, setIsUploading] = useState(false);
-  const [agentOpen, setAgentOpen] = useState(false);
 
   useEffect(() => {
     dispatch(loadCameraSettingsFromStorage());
@@ -729,12 +728,9 @@ const HeaderBar: React.FC<HeaderBarProps> = ({ projectName }) => {
       </div>
 
       <div className="navbar-right">
-        <button className="agent-nav-btn" onClick={() => setAgentOpen(true)}>
-          🤖 Agent
-        </button>
+        <ReportPanel />
         <ProjectNameDisplay projectName={projectName} />
       </div>
-      <AgentChatDialog open={agentOpen} onClose={() => setAgentOpen(false)} />
 
       {showToast && (
         <Toast

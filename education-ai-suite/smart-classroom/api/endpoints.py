@@ -24,7 +24,7 @@ from utils.locks import audio_pipeline_lock, video_analytics_lock
 from components.va.va_pipeline_service import VideoAnalyticsPipelineService, PipelineOptions
 from utils.session_manager import generate_session_id
 from dto.search_dto import SearchRequest
-from dto.report_dto import ReportRequest, AgentChatRequest
+from dto.report_dto import ReportRequest
 from utils.session_state_manager import SessionState
 from dto.ocr_dto import OCRExtractRequest, OCRResponse
 from components.ocr.ocr_pipeline import ocr_detect_file, ocr_extract_text
@@ -884,18 +884,14 @@ async def ocr_extract_text_endpoint(file: UploadFile = File(...), x_session_id: 
 
 @router.post("/report/generate")
 async def generate_report(request: ReportRequest):
-    """
-    Generate a full class evaluation report using the ReAct Agent.
-    """
+    """Generate a class evaluation report."""
     pipeline = Pipeline(request.session_id)
 
     async def event_stream():
-        for event in pipeline.run_report(user_query=request.query):
+        for event in pipeline.run_report():
             if isinstance(event, dict):
                 etype = event["type"]
-                if etype == "thinking":
-                    yield json.dumps({"type": "thinking", "thought": event.get("thought", ""), "action": event.get("action", "")}) + "\n"
-                elif etype in ("plan", "plan_update"):
+                if etype in ("plan", "plan_update"):
                     yield json.dumps({"type": etype, "steps": event.get("steps", [])}) + "\n"
                 elif etype in ("step_start", "step_done"):
                     yield json.dumps({"type": etype, "index": event.get("index")}) + "\n"
@@ -910,151 +906,6 @@ async def generate_report(request: ReportRequest):
             await asyncio.sleep(0)
 
     return StreamingResponse(event_stream(), media_type="application/json")
-
-
-@router.post("/report/chat")
-async def report_chat(request: AgentChatRequest):
-    """
-    Multi-turn chat with the Report Agent (学情Agent).
-    Direct entry point for OpenClaw. session_id is optional.
-    """
-    from components.report_agent.conversation import ConversationManager
-    from utils.session_manager import get_latest_session_id
-
-    session_id = request.session_id
-    if not session_id:
-        session_id = get_latest_session_id()
-        if not session_id:
-            raise HTTPException(status_code=404, detail="No session found. Please complete a class recording first.")
-        logger.info(f"[agent/chat] No session_id provided, using latest: {session_id}")
-
-    conv_manager = ConversationManager(session_id)
-
-    if request.conversation_id:
-        conversation_id = request.conversation_id
-        conv = conv_manager.get_conversation(conversation_id)
-        if conv is None:
-            raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found.")
-        # Check if user message was already added by the /chat unified entry point
-        messages = conv.get("messages", [])
-        if not messages or messages[-1].get("content") != request.message or messages[-1].get("role") != "user":
-            conv_manager.add_message(conversation_id, "user", request.message)
-    else:
-        conversation_id = conv_manager.create_conversation()
-        conv_manager.add_message(conversation_id, "user", request.message)
-
-    previous_observations = conv_manager.get_observations(conversation_id)
-
-    pipeline = Pipeline(session_id)
-
-    async def event_stream():
-        full_response = ""
-        report_ready_sent = False
-
-        for event in pipeline.run_report(
-            user_query=request.message,
-            prior_observations=previous_observations,
-            output_format=request.output_format,
-        ):
-            if isinstance(event, dict):
-                etype = event["type"]
-                if etype == "thinking":
-                    yield json.dumps({"type": "thinking", "thought": event.get("thought", ""), "action": event.get("action", ""), "conversation_id": conversation_id}) + "\n"
-                elif etype in ("plan", "plan_update"):
-                    yield json.dumps({"type": etype, "steps": event.get("steps", []), "conversation_id": conversation_id}) + "\n"
-                elif etype in ("step_start", "step_done"):
-                    yield json.dumps({"type": etype, "index": event.get("index"), "conversation_id": conversation_id}) + "\n"
-                elif etype == "report_ready":
-                    report_ready_sent = True
-                    yield json.dumps({"type": "report_ready", "session_id": event.get("session_id", session_id), "conversation_id": conversation_id}) + "\n"
-                elif etype == "token":
-                    content = event["content"]
-                    if content.startswith("[ERROR]:"):
-                        yield json.dumps({"token": "", "error": content, "conversation_id": conversation_id}) + "\n"
-                        break
-                    full_response += content
-                    yield json.dumps({"token": content, "error": "", "conversation_id": conversation_id}) + "\n"
-            await asyncio.sleep(0)
-
-        # Save assistant response (truncated for context efficiency)
-        if len(full_response) > 500:
-            summary_for_history = full_response[:300] + "\n...[full report saved]..."
-        else:
-            summary_for_history = full_response
-        conv_manager.add_message(conversation_id, "assistant", summary_for_history)
-
-        # Persist observations so follow-up turns can access collected data without re-fetching
-        if hasattr(pipeline, 'report_agent') and pipeline.report_agent and pipeline.report_agent.observations:
-            conv_manager.add_observations(conversation_id, pipeline.report_agent.observations)
-
-        # Signal that a downloadable report is available (only for report mode, not chat)
-        if not report_ready_sent and full_response and request.output_format == "report":
-            yield json.dumps({"type": "report_ready", "session_id": session_id, "conversation_id": conversation_id}) + "\n"
-
-    return StreamingResponse(event_stream(), media_type="application/json")
-
-
-@router.get("/sessions")
-def list_sessions():
-    """List all available sessions (sorted newest first)."""
-    from utils.session_manager import list_sessions
-    return {"sessions": list_sessions()}
-
-
-@router.get("/conversations/{session_id}")
-def list_conversations(session_id: str):
-    """List all conversations for a session with preview of last message."""
-    from components.report_agent.conversation import ConversationManager
-
-    conv_manager = ConversationManager(session_id)
-    conversations = []
-
-    if not os.path.exists(conv_manager.conversations_dir):
-        return {"conversations": []}
-
-    for filename in sorted(os.listdir(conv_manager.conversations_dir), reverse=True):
-        if not filename.endswith(".json"):
-            continue
-        conv_id = filename.replace(".json", "")
-        conv = conv_manager.get_conversation(conv_id)
-        if conv and conv.get("messages"):
-            messages = conv["messages"]
-            first_user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
-            conversations.append({
-                "conversation_id": conv_id,
-                "created_at": conv.get("created_at", ""),
-                "preview": first_user_msg[:50],
-                "message_count": len(messages),
-            })
-
-    return {"conversations": conversations}
-
-
-@router.get("/conversations/{session_id}/{conversation_id}")
-def get_conversation_messages(session_id: str, conversation_id: str):
-    """Load full message history for a conversation."""
-    from components.report_agent.conversation import ConversationManager
-
-    conv_manager = ConversationManager(session_id)
-    conv = conv_manager.get_conversation(conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found.")
-
-    return {
-        "conversation_id": conversation_id,
-        "messages": conv.get("messages", []),
-    }
-
-
-@router.delete("/conversations/{session_id}/{conversation_id}")
-def delete_conversation(session_id: str, conversation_id: str):
-    """Delete a conversation."""
-    from components.report_agent.conversation import ConversationManager
-
-    conv_manager = ConversationManager(session_id)
-    if conv_manager.delete_conversation(conversation_id):
-        return {"status": "deleted"}
-    raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found.")
 
 
 @router.get("/report/{session_id}")
@@ -1120,6 +971,27 @@ def download_report(session_id: str):
     )
 
 
+@router.get("/report/template/preview")
+def preview_report_template(session_id: str = None):
+    """Return the current active report template structure as text preview."""
+    from utils.template_manager import get_template_path, extract_template_structure
+
+    template_path = get_template_path(language="zh", session_id=session_id)
+    if not template_path or not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="No template found.")
+
+    structure = extract_template_structure(template_path)
+    is_custom = "report_template.docx" in template_path and "templates/" not in template_path
+
+    return JSONResponse(content={
+        "path": template_path,
+        "is_custom": is_custom,
+        "sections": structure["sections"],
+        "fields": structure["all_fields"],
+        "raw_text": structure["raw_text"],
+    })
+
+
 @router.post("/report/template/upload")
 def upload_report_template(file: UploadFile = File(...)):
     """Upload a custom report template (.docx). Replaces the project-level default template."""
@@ -1142,48 +1014,6 @@ def upload_report_template(file: UploadFile = File(...)):
     return JSONResponse(
         content={"message": "Template uploaded successfully", "path": template_path},
         status_code=200,
-    )
-
-
-@router.post("/chat")
-async def unified_chat(request: AgentChatRequest):
-    """
-    Unified chat endpoint — delegates to the Orchestrator.
-    Primary entry point for the frontend UI when OpenClaw is not deployed.
-    """
-    from components.orchestrator import orchestrator
-    return await orchestrator.handle_chat(request)
-
-
-# --- Backward-compatible alias ---
-@router.post("/agent/chat")
-async def agent_chat_legacy(request: AgentChatRequest):
-    """Legacy alias for /report/chat. Kept for backward compatibility."""
-    return await report_chat(request)
-
-
-@router.post("/generate-report")
-async def generate_report_legacy(request: ReportRequest):
-    """Legacy alias for /report/generate. Kept for backward compatibility."""
-    return await generate_report(request)
-
-
-# --- Future Agent endpoints (placeholders) ---
-@router.post("/homework/chat")
-async def homework_chat(request: AgentChatRequest):
-    """Multi-turn chat with the Homework Agent (作业Agent). Future."""
-    return JSONResponse(
-        content={"error": "Homework Agent is not yet implemented."},
-        status_code=501,
-    )
-
-
-@router.post("/lesson-prep/chat")
-async def lesson_prep_chat(request: AgentChatRequest):
-    """Multi-turn chat with the Lesson Prep Agent (备课Agent). Future."""
-    return JSONResponse(
-        content={"error": "Lesson Prep Agent is not yet implemented."},
-        status_code=501,
     )
 
 

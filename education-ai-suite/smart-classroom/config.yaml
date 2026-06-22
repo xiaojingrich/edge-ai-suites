@@ -239,13 +239,25 @@ models:
 
   ocr:
     enabled: false # Set to false to disable OCR features
-    provider: openvino # native or openvino
+    provider: openvino # native, openvino, or paddleocr-vl
     device: CPU # CPU or GPU
     model_dir: models/ocr/paddle # Base directory for OCR models
     ocr_version: PP-OCRv4
     det_model: en_PP-OCRv3_det_infer
     rec_model: en_PP-OCRv4_rec_infer
     cls_model: ch_ppocr_mobile_v2.0_cls_infer
+    # PaddleOCR-VL settings (only used when provider: paddleocr-vl)
+    vl:
+      model_dir: null # Path to VL model dir, null for auto-download
+      backend: native # native, vllm-server, sglang-server, fastdeploy-server
+      server_url: null # Required when backend is *-server
+    # VLM image description for detected image regions (disabled by default)
+    vlm_describe:
+      enabled: false # Set to true to enable VLM description of image blocks
+      server_url: "http://127.0.0.1:9900" # OpenAI-compatible VLM endpoint
+      model_name: "Qwen2.5-VL-3B-Instruct"
+      max_tokens: 256
+      prompt: "描述这张图片中的内容，特别是与学生作业答案相关的图形、图表或手绘内容。简洁描述即可。"
 
 
 mindmap:

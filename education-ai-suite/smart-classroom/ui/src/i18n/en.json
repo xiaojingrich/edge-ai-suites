@@ -334,19 +334,20 @@
     "showMore": "Show more",
     "showLess": "Show less"
   },
-  "agent": {
-    "title": "Class Report Agent",
-    "welcome": "Ask me anything about this class session.",
-    "suggest1": "How did students perform today?",
-    "suggest2": "Which time period had the lowest engagement?",
-    "suggest3": "Generate a comprehensive class evaluation report",
-    "suggest4": "Create 5 quiz questions based on today's lesson",
-    "inputPlaceholder": "Ask about this class...",
-    "noSession": "Start a session first",
-    "send": "Send",
-    "stop": "Stop",
-    "newConversation": "New conversation",
-    "thinkingDone": "{{count}} steps completed",
-    "downloadReport": "Download Word Report"
+  "report": {
+    "generate": "Generate Report",
+    "generating": "Generating report...",
+    "download": "Download Report",
+    "regenerate": "Regenerate",
+    "template": "Template",
+    "templatePreview": "Template",
+    "previewTemplate": "Preview report template",
+    "defaultTemplate": "Default Template",
+    "customTemplate": "Custom Template",
+    "noTemplate": "No template found",
+    "uploadTemplate": "Upload custom template",
+    "templateUploaded": "Template uploaded",
+    "templateUploadFailed": "Upload failed",
+    "retry": "Retry"
   }
 }

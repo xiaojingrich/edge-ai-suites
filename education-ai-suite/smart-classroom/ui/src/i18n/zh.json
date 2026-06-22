@@ -335,19 +335,20 @@
     "showMore": "显示更多",
     "showLess": "收起"
   },
-  "agent": {
-    "title": "学情Agent",
-    "welcome": "有什么关于这节课的问题可以问我。",
-    "suggest1": "今天学生表现怎么样？",
-    "suggest2": "哪个时间段参与度最低？",
-    "suggest3": "帮我生成一份完整的课堂评估报告",
-    "suggest4": "根据今天课程内容出5道测验题",
-    "inputPlaceholder": "输入关于课堂的问题...",
-    "noSession": "请先开始一个课堂会话",
-    "send": "发送",
-    "stop": "停止",
-    "newConversation": "新对话",
-    "thinkingDone": "{{count}} 步已完成",
-    "downloadReport": "下载 Word 报告"
+  "report": {
+    "generate": "生成报告",
+    "generating": "正在生成报告...",
+    "download": "下载报告",
+    "regenerate": "重新生成",
+    "template": "模板",
+    "templatePreview": "模板",
+    "previewTemplate": "预览报告模板",
+    "defaultTemplate": "默认模板",
+    "customTemplate": "自定义模板",
+    "noTemplate": "未找到模板",
+    "uploadTemplate": "上传自定义模板",
+    "templateUploaded": "模板上传成功",
+    "templateUploadFailed": "模板上传失败",
+    "retry": "重试"
   }
 }
