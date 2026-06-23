@@ -239,7 +239,7 @@ models:
 
   ocr:
     enabled: false # Set to false to disable OCR features
-    provider: openvino # native, openvino, or paddleocr-vl
+    provider: paddleocr-vl # native, openvino, or paddleocr-vl
     device: CPU # CPU or GPU
     model_dir: models/ocr/paddle # Base directory for OCR models
     ocr_version: PP-OCRv4

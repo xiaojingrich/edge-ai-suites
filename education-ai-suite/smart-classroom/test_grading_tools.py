@@ -189,7 +189,19 @@ def run_ocr(filename: str, homework_dir: str) -> str:
 
     ext = os.path.splitext(filename)[1].lower()
 
-    if ext == ".pdf":
+    if provider == "paddleocr-vl":
+        if ext == ".pdf":
+            from utils.ocr_utils.pdf_utils import pdf_to_images
+            images = pdf_to_images(file_path, dpi=300)
+            page_markdowns = []
+            for i, img_path in enumerate(images, 1):
+                result = ocr.ocr_model.extract_structured(img_path)
+                page_markdowns.append(f"--- Page {i} ---\n{result.markdown}")
+            extracted_text = "\n\n".join(page_markdowns)
+        else:
+            result = ocr.ocr_model.extract_structured(file_path)
+            extracted_text = result.markdown
+    elif ext == ".pdf":
         from utils.ocr_utils.pdf_utils import pdf_to_images
         images = pdf_to_images(file_path, dpi=300)
         page_texts = []
