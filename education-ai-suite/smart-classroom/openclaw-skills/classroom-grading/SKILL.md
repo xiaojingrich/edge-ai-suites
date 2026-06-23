@@ -49,20 +49,24 @@ All data access goes through the `smart-classroom` MCP server:
 For each homework file to grade:
 
 1. Call `ocr_homework(session_id, filename)` to extract text content via OCR
-2. Call `read_homework_image(session_id, filename, page)` to get the image for visual analysis
+2. Check the response's `has_images` field — if `true`, also call `read_homework_image(session_id, filename, page)` for visual analysis
 
-**Why both?** OCR extracts text (questions, answers, numbers) but CANNOT interpret:
-- Geometric figures (triangles, circles, coordinate systems)
-- Function graphs, charts, plots
-- Circuit diagrams, chemical structures
-- Hand-drawn diagrams or illustrations
-- Handwritten mathematical expressions that are complex (fractions, integrals, matrices)
+**OCR output format**: The `ocr_text` field is structured Markdown with layout detection (headings, tables, lists preserved). The response also includes:
+- `has_images`: whether the document contains figures/charts/diagrams
+- `image_blocks`: detected image regions with coordinates, labels, and optional VLM descriptions
 
-**Strategy**: Always get the OCR text for structured extraction, then also read the image when:
+**When to also read the image** (call `read_homework_image`):
+- `has_images` is `true` in the OCR response
 - The OCR text mentions "如图", "如下图", "see figure", "图示"
 - The subject is geometry, physics, or other diagram-heavy subjects
 - The OCR text has gaps or missing content (likely diagram areas)
 - You need to verify handwritten math expressions
+
+**Why?** Even with structured Markdown output, OCR CANNOT fully interpret:
+- Geometric figures (triangles, circles, coordinate systems)
+- Function graphs, charts, plots
+- Circuit diagrams, chemical structures
+- Hand-drawn diagrams or illustrations
 
 For multimodal grading, analyze the image directly to understand the complete question including any figures, then evaluate the student's answer in full context.
 
