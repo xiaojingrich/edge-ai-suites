@@ -24,7 +24,6 @@ from utils.locks import audio_pipeline_lock, video_analytics_lock
 from components.va.va_pipeline_service import VideoAnalyticsPipelineService, PipelineOptions
 from utils.session_manager import generate_session_id
 from dto.search_dto import SearchRequest
-from dto.report_dto import ReportRequest
 from utils.session_state_manager import SessionState
 from dto.ocr_dto import OCRExtractRequest, OCRResponse
 from components.ocr.ocr_pipeline import ocr_detect_file, ocr_extract_text
@@ -881,31 +880,6 @@ def ocr_detect_file_endpoint(file: UploadFile = File(...)):
 async def ocr_extract_text_endpoint(file: UploadFile = File(...), x_session_id: Optional[str] = Header(None)):
     return ocr_extract_text(file, x_session_id)
 
-
-@router.post("/report/generate")
-async def generate_report(request: ReportRequest):
-    """Generate a class evaluation report."""
-    pipeline = Pipeline(request.session_id)
-
-    async def event_stream():
-        for event in pipeline.run_report():
-            if isinstance(event, dict):
-                etype = event["type"]
-                if etype in ("plan", "plan_update"):
-                    yield json.dumps({"type": etype, "steps": event.get("steps", [])}) + "\n"
-                elif etype in ("step_start", "step_done"):
-                    yield json.dumps({"type": etype, "index": event.get("index")}) + "\n"
-                elif etype == "report_ready":
-                    yield json.dumps({"type": "report_ready", "session_id": event.get("session_id", request.session_id)}) + "\n"
-                elif etype == "token":
-                    content = event["content"]
-                    if content.startswith("[ERROR]:"):
-                        yield json.dumps({"token": "", "error": content}) + "\n"
-                        break
-                    yield json.dumps({"token": content, "error": ""}) + "\n"
-            await asyncio.sleep(0)
-
-    return StreamingResponse(event_stream(), media_type="application/json")
 
 
 @router.get("/report/{session_id}")

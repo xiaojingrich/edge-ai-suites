@@ -8,7 +8,6 @@ from utils.session_manager import generate_session_id
 from components.summarizer_component import SummarizerComponent
 from components.mindmap_component import MindmapComponent
 from components.segmentation.content_segmentation import ContentSegmentationComponent
-from components.report_generator.report_generator import ReportGenerator
 from utils.runtime_config_loader import RuntimeConfig
 from utils.storage_manager import StorageManager
 from utils.markdown_cleaner import markdown_to_plain
@@ -52,7 +51,6 @@ class Pipeline:
 
         self.content_component.model = self.summarizer_pipeline[0].summarizer
 
-        self.report_generator = None
 
 
     def run_transcription(self, input):
@@ -282,32 +280,3 @@ class Pipeline:
         logger.info("Search returned %d result(s) from content-search service.", len(results))
         return results
 
-    def run_report(self):
-        """Generate a class evaluation report."""
-        project_config = RuntimeConfig.get_section("Project")
-        session_dir = os.path.join(
-            project_config.get("location"),
-            project_config.get("name"),
-            self.session_id,
-        )
-
-        if not os.path.exists(session_dir):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid session id: {self.session_id}, session directory not found.",
-            )
-
-        self.report_generator = ReportGenerator(
-            session_id=self.session_id,
-        )
-        self.report_generator.model = self.summarizer_pipeline[0].summarizer
-
-        try:
-            for event in self.report_generator.generate_report():
-                yield event
-        except Exception as e:
-            logger.error(f"Error during report generation: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Report generation failed: {e}",
-            )

@@ -57,7 +57,7 @@ class LLMServiceClient:
     HTTP client to the LLM serving service.
 
     Mimics the Summarizer interface so it can be used as a drop-in replacement
-    in SummarizerComponent, ReportGenerator, and llm_serving routes.
+    in SummarizerComponent and llm_serving routes.
     """
 
     def __init__(self, model_path: str, base_url: str = None):
