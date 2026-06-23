@@ -1,3 +1,7 @@
+import os
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("FLAGS_minloglevel", "2")
+
 import sys
 from utils import system_checker
 

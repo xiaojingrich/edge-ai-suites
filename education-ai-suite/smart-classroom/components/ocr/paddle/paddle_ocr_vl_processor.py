@@ -56,8 +56,6 @@ class PaddleOCRVLProcessor(BaseOCR):
         if PaddleOCRVLProcessor._model is None or PaddleOCRVLProcessor._config != model_config_key:
             logger.info("Loading PaddleOCR-VL-1.6 model...")
             from paddleocr import PaddleOCRVL
-            import os
-            os.environ.setdefault("GLOG_minloglevel", "2")
 
             vl_config = getattr(config.models.ocr, "vl", None)
             kwargs = {}
