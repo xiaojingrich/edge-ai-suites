@@ -102,7 +102,7 @@ class PaddleOCRVLProcessor(BaseOCR):
         block_index = 0
 
         for page_result in results:
-            res = page_result if isinstance(page_result, dict) else page_result.get("res", page_result)
+            res = page_result
 
             page_markdown = self._extract_markdown(res)
             markdown_pages.append(page_markdown)
@@ -137,18 +137,27 @@ class PaddleOCRVLProcessor(BaseOCR):
 
     def _extract_markdown(self, res) -> str:
         """Extract markdown content from a page result."""
+        md = None
         if hasattr(res, "markdown"):
-            return res.markdown
-        if isinstance(res, dict):
+            md = res.markdown
+        elif isinstance(res, dict):
             if "markdown" in res:
-                return res["markdown"]
-            lp = res.get("layout_parsing_result")
-            if lp:
-                if hasattr(lp, "markdown"):
-                    return lp.markdown
-                if isinstance(lp, dict) and "markdown" in lp:
-                    return lp["markdown"]
-        return ""
+                md = res["markdown"]
+            else:
+                lp = res.get("layout_parsing_result")
+                if lp:
+                    if hasattr(lp, "markdown"):
+                        md = lp.markdown
+                    elif isinstance(lp, dict) and "markdown" in lp:
+                        md = lp["markdown"]
+
+        if md is None:
+            return ""
+        if isinstance(md, str):
+            return md
+        if isinstance(md, dict):
+            return md.get("markdown_texts", md.get("markdown_text", ""))
+        return str(md)
 
     def _get_layout_result(self, res) -> Optional[dict]:
         """Extract layout detection result from a page result."""

@@ -61,8 +61,8 @@ ultralytics==8.4.39
 # OCR dependencies
 pyclipper
 PyMuPDF==1.26.3
-paddlepaddle==2.6.2
-paddleocr>=3.7.0,<3.8.0
+paddlepaddle>=3.0.0
+paddleocr[doc-parser]>=3.7.0,<3.8.0
 beautifulsoup4==4.13.4
 fire==0.7.1
 rapidfuzz==3.13.0
