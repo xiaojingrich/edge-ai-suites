@@ -1,6 +1,6 @@
 ---
 name: classroom-grading
-description: "Grade student homework submissions: OCR handwritten answers from photos, evaluate correctness, provide scores and feedback."
+description: "Grade student homework submissions: extract answers from photos or scanned PDFs via OCR, evaluate correctness, provide scores and detailed feedback."
 metadata:
   openclaw:
     emoji: "✅"
@@ -41,8 +41,12 @@ All data access goes through the `smart-classroom` MCP server:
 
 ### 1. Discover submissions
 
-1. Call `list_sessions` to find the target session (or use session_id if user provides it)
-2. Call `list_homework_submissions(session_id)` to see all submitted homework images
+1. If user specifies a session (e.g., "批改 20260623 的作业"), use that session_id directly
+2. Otherwise call `list_sessions` to get all sessions:
+   - If only 1 session exists → use it automatically
+   - If multiple sessions exist → use the most recent one that has homework submissions
+   - If unclear, ask the user which session to grade
+3. Call `list_homework_submissions(session_id)` to see all submitted homework images
 
 ### 2. Extract homework content
 
@@ -51,7 +55,13 @@ For each homework file to grade:
 1. Call `ocr_homework(session_id, filename)` to extract text content via OCR
 2. Check the response's `has_images` field — if `true`, also call `read_homework_image(session_id, filename, page)` for visual analysis
 
-**OCR output format**: The `ocr_text` field is structured Markdown with layout detection (headings, tables, lists preserved). The response also includes:
+**OCR output format**: The `ocr_text` field is structured Markdown produced by PaddleOCR-VL with layout detection:
+- Section titles → `## 九、按要求改写句子。（6分）`
+- Question numbers preserved → `50 How many`
+- Fill-in answers in LaTeX underline → `$ \underline{\text{is}} $`
+- Tables, lists, and paragraph structure preserved
+
+The response also includes:
 - `has_images`: whether the document contains figures/charts/diagrams
 - `image_blocks`: detected image regions with coordinates, labels, and optional VLM descriptions
 
@@ -123,7 +133,7 @@ Identify from the OCR text:
 
 ### 6. Save results
 
-Call `save_grading_result(session_id, filename, ocr_text, result)` to persist the grading. This will:
+Call `save_grading_result(session_id, filename, ocr_text, result, student_name, student_id)` to persist the grading. This will:
 - Save the structured data to `grading_results.json`
 - Generate a human-readable Markdown report (`{filename}_grading.md`) containing both the scanned homework content and the grading feedback
 
@@ -207,6 +217,7 @@ Field notes:
 - If OCR is uncertain about a character, note it in the feedback
 - Give the student benefit of the doubt for ambiguous characters
 - Flag illegible portions rather than guessing
+- Extract student answers from `$ \underline{\text{...}} $` patterns — the text inside `\text{}` is the actual handwritten answer recognized by OCR
 
 ## Batch Grading
 

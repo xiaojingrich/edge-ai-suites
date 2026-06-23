@@ -10,7 +10,13 @@
 │  - MCP Client│──────────────────────────────────▶│  - list_sessions     │
 │  - ReAct Loop│◀──────────────────────────────────│  - read_session_files│
 │              │       └────────────────────┘       │  - get_teaching_stats│
-└──────────────┘                                    └──────────────────────┘
+└──────────────┘                                    │  - list_homework_sub.│
+                                                    │  - ocr_homework      │
+                                                    │  - batch_ocr_homework│
+                                                    │  - read_homework_img │
+                                                    │  - save_grading_result│
+                                                    │  - get_grading_results│
+                                                    └──────────────────────┘
 
 Agent 完全运行在 OpenClaw 侧；Smart Classroom 只作为 MCP 工具服务器，
 不再做编排/推理。本地 LLM 用 OpenVINO Model Server (OVMS)，在 Intel GPU 上
@@ -94,13 +100,24 @@ Agent 完全运行在 OpenClaw 侧；Smart Classroom 只作为 MCP 工具服务�
 
 ### Step 1: User Triggers Skill
 
-User sends a message that matches the `classroom-report` skill trigger:
+User sends a message that matches a skill trigger. OpenClaw matches the message against each skill's `description` + `When to Use` keywords and activates the corresponding skill.
 
+**Available skill triggers:**
+
+| Skill | Chinese Triggers | English Triggers |
+|-------|-----------------|------------------|
+| `classroom-report` | 生成课堂报告、课堂分析、教学评估 | generate report, classroom report |
+| `classroom-grading` | 批改作业、批改、打分、评分、改作业、检查作业 | grade homework, check homework, score homework, grading |
+| `classroom-homework` | 布置作业、出题、生成作业 | assign homework, create homework |
+| `classroom-lesson-prep` | 备课、课程准备、教案 | lesson prep, prepare lesson |
+
+Example:
 ```
-User: "生成课堂报告"
+User: "批改作业"     → triggers classroom-grading
+User: "生成课堂报告" → triggers classroom-report
 ```
 
-OpenClaw matches this to the `classroom-report` skill and starts the function calling loop.
+OpenClaw loads the skill's `SKILL.md` as the system prompt and starts the function calling loop.
 
 ### Step 2: First LLM Request (with tools)
 
@@ -276,6 +293,42 @@ Model now has all classroom data in context. It returns the report as Markdown t
 
 Typically **3 LLM rounds** for a full report generation.
 
+## Grading Flow
+
+The `classroom-grading` skill follows a similar ReAct loop but with more tool calls:
+
+```
+User: "批改作业" / "grade homework"
+  ↓
+1. list_sessions() → find target session
+2. list_homework_submissions(session_id) → get homework files
+3. ocr_homework(session_id, filename) or batch_ocr_homework(session_id) → extract text via PaddleOCR-VL
+4. [optional] read_homework_image(session_id, filename) → for diagrams/figures
+5. LLM evaluates answers, produces grading JSON
+6. save_grading_result(session_id, filename, ocr_text, result, student_name, student_id) → persist
+7. Final summary table presented to user
+```
+
+Typically **4-6 LLM rounds** per submission (more if images need visual analysis).
+
+### Homework File Location
+
+Students' homework files (photos or scanned PDFs) should be placed in:
+
+```
+storage/smart-classroom/<session_id>/homework/
+```
+
+Supported formats: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tiff`, `.webp`, `.pdf`
+
+Filename conventions for automatic student identification:
+- `2024001_张三.pdf` → student_id: "2024001", student_name: "张三"
+- `张三_2024001.jpg` → student_name: "张三", student_id: "2024001"
+- `2024001.pdf` → student_id: "2024001"
+- `张三.jpg` → student_name: "张三"
+
+> **Note on grading LLM**: The grading skill requires the model to output structured JSON with per-question corrections. Models with strong instruction-following (Qwen2.5-7B+, Kimi K2.5) work well. For multimodal grading (diagrams), use a model with image input support.
+
 ## Deployment
 
 ### 1. OVMS (OpenVINO Model Server with Function Calling)
@@ -384,6 +437,7 @@ Copy skill definitions from smart-classroom to the OpenClaw agent workspace:
 
 ```bash
 cp -r education-ai-suite/smart-classroom/openclaw-skills/classroom-report <openclaw-workspace>/skills/
+cp -r education-ai-suite/smart-classroom/openclaw-skills/classroom-grading <openclaw-workspace>/skills/
 cp -r education-ai-suite/smart-classroom/openclaw-skills/classroom-homework <openclaw-workspace>/skills/
 cp -r education-ai-suite/smart-classroom/openclaw-skills/classroom-lesson-prep <openclaw-workspace>/skills/
 ```
@@ -427,7 +481,7 @@ OVMS is a custom OpenAI-compatible provider. Register it under `models.providers
           "theme": "classroom analysis assistant",
           "emoji": ""
         },
-        "skills": ["classroom-report", "classroom-homework", "classroom-lesson-prep"]
+        "skills": ["classroom-report", "classroom-grading", "classroom-homework", "classroom-lesson-prep"]
 
       }
     ]
@@ -584,7 +638,9 @@ OVMS_API_KEY=ovms-local
 }
 ```
 
-- `smart-classroom`: classroom session data + stats (`list_sessions`, `read_session_files`, `get_teaching_stats`)
+- `smart-classroom`: classroom session data, stats, and grading tools:
+  - **Report tools**: `list_sessions`, `read_session_files`, `get_teaching_stats`
+  - **Grading tools**: `list_homework_submissions`, `ocr_homework`, `batch_ocr_homework`, `read_homework_image`, `save_grading_result`, `get_grading_results`
 
 > **Report output format:** reports are generated as **Markdown** by the model and returned directly to the user — no docx MCP server is required.
 >
