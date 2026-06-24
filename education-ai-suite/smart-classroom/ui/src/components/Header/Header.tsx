@@ -52,7 +52,6 @@ import {
 } from '../../services/api';
 import Toast from '../common/Toast';
 import UploadFilesModal from '../Modals/UploadFilesModal';
-import ReportPanel from '../ReportPanel';
 
 interface HeaderBarProps {
   projectName: string;
@@ -728,7 +727,6 @@ const HeaderBar: React.FC<HeaderBarProps> = ({ projectName }) => {
       </div>
 
       <div className="navbar-right">
-        <ReportPanel />
         <ProjectNameDisplay projectName={projectName} />
       </div>
 

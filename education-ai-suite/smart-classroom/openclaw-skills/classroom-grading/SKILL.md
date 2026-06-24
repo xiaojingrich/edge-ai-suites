@@ -39,14 +39,16 @@ All data access goes through the `smart-classroom` MCP server:
 
 ## Workflow
 
+Execute ALL steps below in sequence. Do NOT pause to ask the user between steps.
+
 ### 1. Discover submissions
 
 1. If user specifies a session (e.g., "批改 20260623 的作业"), use that session_id directly
 2. Otherwise call `list_sessions` to get all sessions:
    - If only 1 session exists → use it automatically
-   - If multiple sessions exist → use the most recent one that has homework submissions
-   - If unclear, ask the user which session to grade
+   - If multiple sessions exist → use the most recent one automatically
 3. Call `list_homework_submissions(session_id)` to see all submitted homework images
+4. If a specific student is named, filter to their file only. Otherwise grade ALL files.
 
 ### 2. Extract homework content
 
@@ -100,11 +102,9 @@ Look for common patterns in the first few lines of OCR text:
 - If OCR cannot extract (e.g., handwriting unreadable), fall back to filename-parsed info
 - Pass both `student_name` and `student_id` to `save_grading_result`
 
-### 4. Understand lesson context (optional)
+### 4. Understand lesson context (skip by default)
 
-If needed for context on what was taught:
-
-- Call `read_session_files(session_id, ["summary.md", "topics.json"])` to understand the lesson content and expected knowledge points
+Do NOT call `read_session_files` unless the user explicitly asks for lesson-aware grading. It consumes context and adds latency. Grade based on the homework content itself.
 
 ### 5. Grade the homework
 
@@ -239,7 +239,9 @@ This is much more efficient than calling `ocr_homework` one by one — use `batc
 
 ## Rules
 
+- ONLY grade files for which you have received OCR text (either from `ocr_homework` or from `batch_ocr_homework`). NEVER call `save_grading_result` for a file whose OCR text you do not have.
 - ONLY grade based on OCR-extracted content or visual analysis of the actual image. NEVER invent student answers.
+- Every file MUST be OCR'd before grading. Use `batch_ocr_homework` for multiple files (1 call returns all results), or `ocr_homework` per file.
 - If OCR fails or is unreadable, report it clearly rather than guessing.
 - Be fair and consistent across all submissions.
 - When uncertain about correctness (e.g., open-ended questions), explain your reasoning.
