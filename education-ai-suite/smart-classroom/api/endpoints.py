@@ -8,6 +8,7 @@ from dto.transcription_dto import TranscriptionRequest
 from dto.summarizer_dto import SummaryRequest
 from dto.video_analytics_dto import VideoAnalyticsRequest
 from dto.video_metadata_dto import VideoDurationRequest
+from dto.irfes_dto import IRFESRequest
 from pipeline import Pipeline
 import json, os, time
 import subprocess, re
@@ -793,6 +794,27 @@ def search_content(request: SearchRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Search failed: {e}"
+        )
+
+
+@router.post("/irfes-analysis")
+def irfes_analysis(request: IRFESRequest):
+    pipeline = Pipeline(request.session_id)
+
+    try:
+        analysis = pipeline.run_irfes_analysis()
+        return {
+            "session_id": request.session_id,
+            "analysis": analysis,
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"IRFES analysis failed: {e}"
         )
 
 @router.get("/check-recorded-videos")

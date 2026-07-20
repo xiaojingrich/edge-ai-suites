@@ -8,6 +8,7 @@ from utils.session_manager import generate_session_id
 from components.summarizer_component import SummarizerComponent
 from components.mindmap_component import MindmapComponent
 from components.segmentation.content_segmentation import ContentSegmentationComponent
+from components.irfes_component import IRFESComponent
 from utils.runtime_config_loader import RuntimeConfig
 from utils.storage_manager import StorageManager
 from utils.markdown_cleaner import markdown_to_plain
@@ -50,6 +51,12 @@ class Pipeline:
         )
 
         self.content_component.model = self.summarizer_pipeline[0].summarizer
+
+        self.irfes_component = IRFESComponent(
+            self.session_id,
+            temperature=0.0
+        )
+        self.irfes_component.model = self.summarizer_pipeline[0].summarizer
 
 
     def run_transcription(self, input):
@@ -277,3 +284,54 @@ class Pipeline:
             results = []
         logger.info("Search returned %d result(s) from content-search service.", len(results))
         return results
+
+    def run_irfes_analysis(self):
+        project_config = RuntimeConfig.get_section("Project")
+        session_dir = os.path.join(
+            project_config.get("location"),
+            project_config.get("name"),
+            self.session_id
+        )
+        transcription_path = os.path.join(session_dir, "transcription.txt")
+
+        try:
+            transcript_text = StorageManager.read_text_file(transcription_path)
+            if not transcript_text:
+                logger.error("Transcription is empty. Cannot generate IRFES analysis.")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Transcription is empty. Cannot generate IRFES analysis."
+                )
+        except FileNotFoundError:
+            logger.error(f"Invalid Session ID: {self.session_id}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid session id: {self.session_id}, transcription not found."
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error while accessing transcription: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An unexpected error occurred while accessing the transcription."
+            )
+
+        try:
+            analysis = self.irfes_component.generate_irfes(
+                transcript_text,
+                language=config.app.language,
+            )
+            output_path = os.path.join(session_dir, "irfes_analysis.json")
+            StorageManager.save(
+                output_path,
+                json.dumps(analysis, ensure_ascii=False, indent=2),
+                append=False,
+            )
+            return analysis
+        except Exception as e:
+            logger.error(f"Error during IRFES analysis: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error during IRFES analysis: {e}"
+            )
