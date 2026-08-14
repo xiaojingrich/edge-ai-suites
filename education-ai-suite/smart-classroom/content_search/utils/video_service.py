@@ -7,6 +7,28 @@ import os
 import httpx
 import json
 import traceback
+from typing import Optional
+
+
+DEFAULT_VIDEO_SUMMARY_PROMPTS = {
+    "en": (
+        "These images are consecutive frames from the same video chunk. "
+        "Write one concise English chunk summary that covers key actions/objects/changes "
+        "and any text visible on a blackboard, whiteboard, or slides (mention only if present), "
+        "avoids repetition, and describes notable changes in order if present."
+    ),
+    "zh": (
+        "以下图像是同一段视频片段中的连续帧。"
+        "请用简体中文写一段简洁的整体总结，涵盖关键动作/物体/变化，"
+        "以及黑板、白板或幻灯片上的文字（仅在出现时提及），"
+        "避免重复，如有明显变化请按顺序描述。"
+    ),
+}
+
+
+def get_default_video_summary_prompt() -> str:
+    language = os.getenv("APP_LANGUAGE", "en").lower()
+    return DEFAULT_VIDEO_SUMMARY_PROMPTS.get(language, DEFAULT_VIDEO_SUMMARY_PROMPTS["en"])
 
 class VideoService:
     def __init__(self):
@@ -20,14 +42,7 @@ class VideoService:
         file_key: str,
         bucket_name: str,
         tags: list = None,
-        prompt: str = (
-            "Please summarize this classroom video segment. "
-            "Focus on the teaching activities, lecture topics, "
-            "key knowledge points being explained, "
-            "any content written or displayed on the blackboard/screen, "
-            "student behaviors (e.g. raising hands, taking notes, discussing, distracted, leaving the classroom), "
-            "and notable student-teacher interactions."
-        ),
+        prompt: Optional[str] = None,
         chunk_duration: int = None,
         run_id: str = None
     ):
@@ -39,8 +54,7 @@ class VideoService:
             "tags": tags
         }
 
-        if prompt is not None:
-            payload["prompt"] = prompt
+        payload["prompt"] = prompt or get_default_video_summary_prompt()
 
         if chunk_duration is not None:
             payload["chunk_duration_s"] = chunk_duration
